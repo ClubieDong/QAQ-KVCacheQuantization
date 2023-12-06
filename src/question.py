@@ -13,7 +13,7 @@ class Question:
     answer_idx: int
 
 
-def load_questions(tokenizer: LlamaTokenizerFast):
+def load_questions(tokenizer: LlamaTokenizerFast, question_count: int):
     raw_dataset: list[dict[str, str]] = load_dataset("Rowan/hellaswag", split="validation")
     print("Dataset loaded!")
     questions: list[Question] = []
@@ -21,6 +21,8 @@ def load_questions(tokenizer: LlamaTokenizerFast):
         question = tokenizer(f"{data['activity_label']}: {data['ctx']}", return_tensors="pt", add_special_tokens=True, return_attention_mask=False).input_ids
         choices = tokenizer(data["endings"], return_tensors="pt", padding=True, add_special_tokens=False, return_attention_mask=True)
         questions.append(Question(question, choices.input_ids, choices.attention_mask.sum(dim=1).tolist(), int(data["label"])))
+        if len(questions) >= question_count:
+            break
     random.seed(42)
     random.shuffle(questions)
     return questions

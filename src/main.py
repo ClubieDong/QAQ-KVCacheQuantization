@@ -1,86 +1,137 @@
+import os
 import torch
 from question import load_questions
 from quantizer import build_quantizers
 from evaluator import Evaluator
 from transformers import LlamaForCausalLM, LlamaTokenizerFast
 
+# NOTE: uncomment this line when debugging
+# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 model_name = "meta-llama/Llama-2-7b-hf"
 device = torch.device("cuda:0")
 dtype = torch.float16
-repeat_count = 100
-cache_file = "cache_03.json"
+question_count = 100
+cache_file = None
+# cache_file = "cache_04.json"
 
+# key_quantizer_configs = [{
+#     "key_or_value_cache": ["key"],
+#     "use_attentions": [False],
+#     "method": ["uniform", "normal"],
+#     "level": ["token", "layer", "head"],
+#     "symmetric": [False],
+#     "n_bits_uniform": [2, 3, 4, 6, 8],
+# }, {
+#     "key_or_value_cache": ["key"],
+#     "use_attentions": [True],
+#     "method": ["uniform"],
+#     "level": ["token", "layer", "head"],
+#     "symmetric": [False],
+#     "last_n_attentions": [1, 5, 10, 20],
+#     "target_quantization_error": [0.013],
+#     "n_bits_min": [1, 2, 3, 4],
+#     "n_bits_max": [8],
+# }, {
+#     "key_or_value_cache": ["key"],
+#     "use_attentions": [True],
+#     "method": ["uniform"],
+#     "level": ["token", "layer", "head"],
+#     "symmetric": [False],
+#     "last_n_attentions": [5],
+#     "target_quantization_error": [0.011, 0.013, 0.015],
+#     "n_bits_min": [1, 2, 3, 4],
+#     "n_bits_max": [8],
+# }]
+# value_quantizer_configs = [{
+#     "key_or_value_cache": ["value"],
+#     "use_attentions": [False],
+#     "method": ["uniform", "normal"],
+#     "level": ["token", "layer", "head"],
+#     "symmetric": [False],
+#     "n_bits_uniform": [2, 3, 4, 6, 8],
+# }, {
+#     "key_or_value_cache": ["value"],
+#     "use_attentions": [True],
+#     "method": ["uniform"],
+#     "level": ["token", "layer", "head"],
+#     "symmetric": [False],
+#     "last_n_attentions": [1, 5, 10, 20],
+#     "target_quantization_error": [0.004],
+#     "n_bits_min": [1, 2, 3, 4],
+#     "n_bits_max": [8],
+# }, {
+#     "key_or_value_cache": ["value"],
+#     "use_attentions": [True],
+#     "method": ["uniform"],
+#     "level": ["token", "layer", "head"],
+#     "symmetric": [False],
+#     "last_n_attentions": [5],
+#     "target_quantization_error": [0.002, 0.004, 0.006],
+#     "n_bits_min": [1, 2, 3, 4],
+#     "n_bits_max": [8],
+# }]
+
+# ===== DEBUG =====
 key_quantizer_configs = [{
     "key_or_value_cache": ["key"],
     "use_attentions": [False],
-    "method": ["uniform", "normal"],
-    "level": ["token", "layer", "head"],
+    "method": ["normal"],
+    "level": ["token"],
     "symmetric": [False],
-    "n_bits_uniform": [2, 3, 4, 6, 8],
-}, {
-    "key_or_value_cache": ["key"],
-    "use_attentions": [True],
-    "method": ["uniform"],
-    "level": ["token", "layer", "head"],
-    "symmetric": [False],
-    "last_n_attentions": [1, 5, 10, 20],
-    "target_quantization_error": [0.013],
-    "n_bits_min": [1, 2, 3, 4],
-    "n_bits_max": [8],
-}, {
-    "key_or_value_cache": ["key"],
-    "use_attentions": [True],
-    "method": ["uniform"],
-    "level": ["token", "layer", "head"],
-    "symmetric": [False],
-    "last_n_attentions": [5],
-    "target_quantization_error": [0.011, 0.013, 0.015],
-    "n_bits_min": [1, 2, 3, 4],
-    "n_bits_max": [8],
+    "outliers_ratio": [0.01],
+    "n_bits_uniform": [4],
 }]
 value_quantizer_configs = [{
     "key_or_value_cache": ["value"],
     "use_attentions": [False],
-    "method": ["uniform", "normal"],
-    "level": ["token", "layer", "head"],
+    "method": ["normal"],
+    "level": ["token"],
     "symmetric": [False],
-    "n_bits_uniform": [2, 3, 4, 6, 8],
-}, {
-    "key_or_value_cache": ["value"],
-    "use_attentions": [True],
-    "method": ["uniform"],
-    "level": ["token", "layer", "head"],
-    "symmetric": [False],
-    "last_n_attentions": [1, 5, 10, 20],
-    "target_quantization_error": [0.004],
-    "n_bits_min": [1, 2, 3, 4],
-    "n_bits_max": [8],
-}, {
-    "key_or_value_cache": ["value"],
-    "use_attentions": [True],
-    "method": ["uniform"],
-    "level": ["token", "layer", "head"],
-    "symmetric": [False],
-    "last_n_attentions": [5],
-    "target_quantization_error": [0.002, 0.004, 0.006],
-    "n_bits_min": [1, 2, 3, 4],
-    "n_bits_max": [8],
+    "outliers_ratio": [0.01],
+    "n_bits_uniform": [4],
 }]
+
+# key_quantizer_configs = [{
+#     "key_or_value_cache": ["key"],
+#     "use_attentions": [True],
+#     "method": ["uniform"],
+#     "level": ["no-quantization", "layer"],
+#     "symmetric": [False],
+#     "outliers_ratio": [0.01],
+#     "last_n_attentions": [5],
+#     "target_quantization_error": [0.013],
+#     "n_bits_min": [2],
+#     "n_bits_max": [8],
+# }]
+# value_quantizer_configs = [{
+#     "key_or_value_cache": ["value"],
+#     "use_attentions": [True],
+#     "method": ["uniform"],
+#     "level": ["no-quantization", "layer"],
+#     "symmetric": [False],
+#     "outliers_ratio": [0.01],
+#     "last_n_attentions": [5],
+#     "target_quantization_error": [0.013],
+#     "n_bits_min": [2],
+#     "n_bits_max": [8],
+# }]
+
+# ===== DEBUG =====
 
 
 def main():
     tokenizer = LlamaTokenizerFast.from_pretrained(model_name)
     tokenizer.pad_token_id = 0
     model = LlamaForCausalLM.from_pretrained(model_name, device_map="auto", torch_dtype=dtype).eval()
-    questions = load_questions(tokenizer)
+    questions = load_questions(tokenizer, question_count)
     key_quantizers = build_quantizers(dtype, device, key_quantizer_configs)
     value_quantizers = build_quantizers(dtype, device, value_quantizer_configs)
     assert len(key_quantizers) == len(value_quantizers)
     print(f"Total # of evaluations: {len(key_quantizers)}")
     for key_quantizer, value_quantizer in zip(key_quantizers, value_quantizers):
         evaluator = Evaluator(device, model, questions, key_quantizer, value_quantizer)
-        result = evaluator.cached_evaluate(repeat_count, cache_file, use_tqdm=True)
+        result = evaluator.cached_evaluate(cache_file, use_tqdm=True)
         print()
         print(f"{evaluator.quantizer_name}:")
         print(f"    Accuracy: {result.accuracy*100:.6f}%")

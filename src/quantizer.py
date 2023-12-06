@@ -1,3 +1,4 @@
+import math
 import torch
 import numpy as np
 from scipy.stats import norm
@@ -24,6 +25,9 @@ class Quantizer:
                  # uniform: assume normalized cache values obbey uniform distribution between max value and min value
                  # normal: assume normalized cache values obbey standard normal distribution
                  method: Optional[QuantizationMethods] = None,
+                 # TODO: Auto determine outliers_ratio
+                 # Percentage of outliers (including both lowest and highest)
+                 outliers_ratio: Optional[float] = None,
                  # Whether to enable attention-aware quantization
                  use_attentions: Optional[bool] = None,
                  # (only applicable for uniform quantization)
@@ -46,12 +50,12 @@ class Quantizer:
         self.key_or_value_cache = key_or_value_cache
         # Early exit for no quantization
         assert level is not None
+        self.level = level
         if level == "no-quantization":
             return
         self.dtype = dtype
         self.device = device
         # Set level
-        self.level = level
         if level == "token":
             self.quantize_dims = (-3, -2, -1)
         elif level == "layer":
@@ -61,6 +65,9 @@ class Quantizer:
         # Set symmetric
         assert symmetric is not None
         self.symmetric = symmetric
+        # Set outliers_ratio
+        assert outliers_ratio is not None
+        self.outliers_ratio = outliers_ratio
         # Set use_attentions:
         assert use_attentions is not None
         self.use_attentions = use_attentions
@@ -114,7 +121,7 @@ class Quantizer:
             name = "Value("
         if self.level == "no-quantization":
             return name + "NoQuantization)"
-        name += f"level={self.level},symmetric={self.symmetric},method={self.method_name},attention-aware={self.use_attentions},"
+        name += f"level={self.level},symmetric={self.symmetric},method={self.method_name},outliers_ratio={self.outliers_ratio},attention-aware={self.use_attentions},"
         if self.use_attentions:
             name += f"n-bits-min={self.n_bits_min},n-bits-max={self.n_bits_max},last-n-attentions={self.last_n_attentions},target-error={self.target_quantization_error:.3f}"
         else:
@@ -158,10 +165,27 @@ class Quantizer:
         if self.last_n_attentions > 1:
             n_bits[:, -self.last_n_attentions+1:] = self.n_bits_max
         return n_bits
-    
+
+    def _calc_outlier_mask(self, cache: torch.Tensor) -> torch.Tensor:
+        if self.outliers_ratio == 0.0:
+            return torch.zeros_like(cache, dtype=torch.bool, device=self.device)
+        # cache.shape: (n_batch, seq_len, n_layer, n_head, embed_size_per_head)
+        cache_flat = cache.flatten(start_dim=-len(self.quantize_dims))
+        # cache_flat.shape: (n_batch, seq_len, n_layer*n_head*embed_size_per_head) or (n_batch, seq_len, n_layer, n_head*embed_size_per_head) or (n_batch, seq_len, n_layer, n_head, embed_size_per_head)
+        lower_threshold = torch.kthvalue(cache_flat, k=int(math.ceil(self.outliers_ratio/2 * cache_flat.shape[-1])), dim=-1).values
+        upper_threshold = torch.kthvalue(cache_flat, k=int(math.floor((1.0 - self.outliers_ratio/2) * cache_flat.shape[-1])), dim=-1).values
+        # lower_threshold/upper_threshold.shape: (n_batch, seq_len) or (n_batch, seq_len, n_layer) or (n_batch, seq_len, n_layer, n_head)
+        lower_threshold = lower_threshold.view(*lower_threshold.shape, *((1,)*len(self.quantize_dims)))
+        upper_threshold = upper_threshold.view(*upper_threshold.shape, *((1,)*len(self.quantize_dims)))
+        # lower_threshold/upper_threshold.shape: (n_batch, seq_len, 1, 1, 1) or (n_batch, seq_len, n_layer, 1, 1) or (n_batch, seq_len, n_layer, n_head, 1)
+        mask = (cache <= lower_threshold) | (cache > upper_threshold)
+        # mask.shape = (n_batch, seq_len, n_layer, n_head, embed_size_per_head)
+        return mask
+
     # Returns (normalized cache, mean value, scale value)
-    def _normalize(self, cache: torch.Tensor, method: Literal["minmax", "std"], n_bits: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # cache.shape: (n_count, n_layer, n_head, embed_size_per_head) or (n_count, n_head, embed_size_per_head), (n_count, embed_size_per_head)
+    def _normalize(self, cache: torch.Tensor, method: Literal["minmax", "std"], n_bits: int, outlier_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # cache/outlier_mask.shape: (n_count, n_layer, n_head, embed_size_per_head) or (n_count, n_head, embed_size_per_head), (n_count, embed_size_per_head)
+        cache = torch.masked.masked_tensor(cache, torch.logical_not(outlier_mask))
         if self.symmetric:
             mean_value = torch.zeros((1,)*cache.dim(), dtype=self.dtype, device=self.device)
             if method == "minmax":
@@ -176,7 +200,12 @@ class Quantizer:
                 min_value = cache.amin(dim=self.quantize_dims, keepdim=True)
                 scale_value = (max_value - min_value) / (2 ** n_bits)
             elif method == "std":
-                scale_value = cache.std(dim=self.quantize_dims, keepdim=True)
+                scale_value = cache.to(torch.float64).std(dim=self.quantize_dims, keepdim=True).to(self.dtype)
+        assert mean_value.get_mask().all()
+        assert scale_value.get_mask().all()
+        cache = cache.get_data()
+        mean_value = mean_value.get_data()
+        scale_value = scale_value.get_data()
         # mean_value/scale_value.shape: (n_count, n_layer/1, n_head/1, embed_size_per_head/1) or (n_count, n_head/1, embed_size_per_head/1), (n_count, embed_size_per_head/1)
         normalized_cache = (cache - mean_value) / scale_value
         # normalized_cache.shape: (n_count, n_layer, n_head, embed_size_per_head) or (n_count, n_head, embed_size_per_head), (n_count, embed_size_per_head)
@@ -185,23 +214,23 @@ class Quantizer:
     def _denormalize(self, normalized_cache: torch.Tensor, mean_value: torch.Tensor, scale_value: torch.Tensor) -> torch.Tensor:
         return normalized_cache * scale_value + mean_value
 
-    def _uniform_quantize(self, cache: torch.Tensor, n_bits: int) -> torch.Tensor:
-        # cache.shape: (n_count, n_layer, n_head, embed_size_per_head) or (n_count, n_head, embed_size_per_head), (n_count, embed_size_per_head)
-        normalized_cache, mean_value, scale_value = self._normalize(cache, method="minmax", n_bits=n_bits)
+    def _uniform_quantize(self, cache: torch.Tensor, n_bits: int, outlier_mask: torch.Tensor) -> torch.Tensor:
+        # cache/outlier_mask.shape: (n_count, n_layer, n_head, embed_size_per_head) or (n_count, n_head, embed_size_per_head), (n_count, embed_size_per_head)
+        normalized_cache, mean_value, scale_value = self._normalize(cache, "minmax", n_bits, outlier_mask)
         quantized_cache = torch.clamp(torch.round(normalized_cache).to(torch.int32), -(2 ** (n_bits-1)), 2 ** (n_bits-1) - 1)
         dequantized_cache = quantized_cache.to(self.dtype)
         denormalized_cache = self._denormalize(dequantized_cache, mean_value, scale_value)
         # denormalized_cache.shape: (n_count, n_layer, n_head, embed_size_per_head) or (n_count, n_head, embed_size_per_head), (n_count, embed_size_per_head)
-        return denormalized_cache
+        return torch.where(outlier_mask, cache, denormalized_cache)
 
-    def _normal_quantize(self, cache: torch.Tensor, n_bits: int) -> torch.Tensor:
-        # cache.shape: (n_count, n_layer, n_head, embed_size_per_head) or (n_count, n_head, embed_size_per_head), (n_count, embed_size_per_head)
-        normalized_cache, mean_value, scale_value = self._normalize(cache, method="std", n_bits=n_bits)
+    def _normal_quantize(self, cache: torch.Tensor, n_bits: int, outlier_mask: torch.Tensor) -> torch.Tensor:
+        # cache/outlier_mask.shape: (n_count, n_layer, n_head, embed_size_per_head) or (n_count, n_head, embed_size_per_head), (n_count, embed_size_per_head)
+        normalized_cache, mean_value, scale_value = self._normalize(cache, "std", n_bits, outlier_mask)
         quantized_cache = torch.searchsorted(self.normal_quantiles_upper_bound[n_bits], normalized_cache.contiguous())
         dequantized_cache = self.normal_quantiles_center[n_bits][quantized_cache]
         denormalized_cache = self._denormalize(dequantized_cache, mean_value, scale_value)
         # denormalized_cache.shape: (n_count, n_layer, n_head, embed_size_per_head) or (n_count, n_head, embed_size_per_head), (n_count, embed_size_per_head)
-        return denormalized_cache
+        return torch.where(outlier_mask, cache, denormalized_cache)
 
     # Returns (quantized kvcache, average n_bits)
     def quantize(self, cache: torch.Tensor, attentions: AttentionType) -> tuple[torch.Tensor, float]:
@@ -212,11 +241,14 @@ class Quantizer:
         # cache.shape: (n_batch, seq_len, n_layer, n_head, embed_size_per_head)
         n_bits = self._calc_quantization_bits(attentions)
         # n_bits.shape: (n_batch, seq_len) or (n_batch, seq_len, n_layer) or (n_batch, seq_len, n_layer, n_head)
+        outlier_mask = self._calc_outlier_mask(cache)
+        # outlier_mask.shape: (n_batch, seq_len, n_layer, n_head, embed_size_per_head)
         average_n_bits = n_bits.mean(dtype=self.dtype).item()
+        average_n_bits = average_n_bits * (1 - self.outliers_ratio) + torch.finfo(self.dtype).bits * self.outliers_ratio
         n_bits_min, n_bits_max = n_bits.min().item(), n_bits.max().item()
         for n in range(n_bits_min, n_bits_max+1):
             indices = torch.where(n_bits == n)
-            cache[indices] = self.quantization_method(cache[indices], n_bits=n)
+            cache[indices] = self.quantization_method(cache[indices], n_bits=n, outlier_mask=outlier_mask[indices])
         cache = cache.permute(2, 0, 3, 1, 4)
         # cache.shape: (n_layer, n_batch, n_head, seq_len, embed_size_per_head)
         return cache, average_n_bits

@@ -5,6 +5,7 @@ import torch
 from tqdm import tqdm
 from typing import Optional
 from question import Question
+from matplotlib import pyplot as plt
 from torch.nn import functional as F
 from functools import cached_property
 from transformers import LlamaForCausalLM
@@ -44,12 +45,13 @@ class Evaluator:
         return f"{self.key_quantizer.name} | {self.value_quantizer.name}"
     
     def _calc_tensor_error(self, tensor1: torch.Tensor, tensor2: torch.Tensor) -> float:
+        # TODO: MAE or MSE?
         return (tensor1.to(self.device) - tensor2.to(self.device)).abs().mean().item()
 
     def _calc_attention_error(self, attention1: AttentionType, attention2: AttentionType) -> float:
         return sum(self._calc_tensor_error(attn1, attn2) for attn1, attn2 in zip(attention1, attention2))
 
-    def _evaluate_single(self, question: Question) -> EvaluationResult:
+    def _evaluate_single(self, idx: int, question: Question) -> EvaluationResult:
         # Forward of question
         result = self.model.forward(question.question, use_cache=True, output_attentions=True, return_dict=True)
         kvcache, attentions, logits = result.past_key_values, result.attentions, result.logits
@@ -58,6 +60,13 @@ class Evaluator:
         value_cache = torch.stack([value.to(self.device) for _, value in kvcache])
         quantized_key_cache, key_average_n_bits = self.key_quantizer.quantize(key_cache, attentions)
         quantized_value_cache, value_average_n_bits = self.value_quantizer.quantize(value_cache, attentions)
+        if idx == 0:
+            self.draw_cache_insights({
+                "Key cache": key_cache,
+                "Quantized key cache": quantized_key_cache,
+                "Value cache": value_cache,
+                "Quantized value cache": quantized_value_cache,
+            })
         quantized_kvcache = [
             (key.expand(len(question.choices), -1, -1, -1), value.expand(len(question.choices), -1, -1, -1))
             for key, value in zip(quantized_key_cache, quantized_value_cache)
@@ -93,12 +102,12 @@ class Evaluator:
             value_average_n_bits=value_average_n_bits,
         )
 
-    def evaluate(self, count: int, use_tqdm: bool) -> EvaluationResult:
+    def evaluate(self, use_tqdm: bool) -> EvaluationResult:
         result = EvaluationResult()
         total_tokens = 0
         with torch.no_grad():
-            for question in tqdm(self.questions[:count]) if use_tqdm else self.questions[:count]:
-                single_result = self._evaluate_single(question)
+            for idx, question in enumerate(tqdm(self.questions) if use_tqdm else self.questions):
+                single_result = self._evaluate_single(idx, question)
                 n_tokens = question.question.shape[1]
                 total_tokens += n_tokens
                 result.accuracy += single_result.accuracy
@@ -111,20 +120,21 @@ class Evaluator:
                 result.value_average_size += single_result.value_average_size * n_tokens
                 result.key_average_n_bits += single_result.key_average_n_bits * n_tokens
                 result.value_average_n_bits += single_result.value_average_n_bits * n_tokens
-        result.accuracy /= count
-        result.accuracy_confidence = 1.96 * math.sqrt(result.accuracy * (1.0 - result.accuracy) / count)
-        result.answer_log_probability /= count
-        result.key_quantization_error /= count
-        result.value_quantization_error /= count
-        result.attention_error /= count
-        result.logit_error /= count
+        result.accuracy /= len(self.questions)
+        # Calculate 95% confidence interval
+        result.accuracy_confidence = 1.96 * math.sqrt(result.accuracy * (1.0 - result.accuracy) / len(self.questions))
+        result.answer_log_probability /= len(self.questions)
+        result.key_quantization_error /= len(self.questions)
+        result.value_quantization_error /= len(self.questions)
+        result.attention_error /= len(self.questions)
+        result.logit_error /= len(self.questions)
         result.key_average_size /= total_tokens
         result.value_average_size /= total_tokens
         result.key_average_n_bits /= total_tokens
         result.value_average_n_bits /= total_tokens
         return result
 
-    def cached_evaluate(self, count: int, cache_file: Optional[str], use_tqdm: bool) -> EvaluationResult:
+    def cached_evaluate(self, cache_file: Optional[str], use_tqdm: bool) -> EvaluationResult:
         if cache_file is not None and os.path.exists(cache_file):
             with open(cache_file, "r") as f:
                 cached_results = json.load(f)
@@ -132,9 +142,37 @@ class Evaluator:
                     return EvaluationResult(**cached_results[self.quantizer_name])
         else:
             cached_results = {}
-        result = self.evaluate(count, use_tqdm)
+        result = self.evaluate(use_tqdm)
         cached_results[self.quantizer_name] = asdict(result)
         if cache_file is not None:
             with open(cache_file, "w") as f:
                 json.dump(cached_results, f, indent=4, separators=(", ", ": "))
         return result
+
+    def draw_cache_insights(self, caches: dict[str, torch.Tensor]) -> None:
+        # cache.shape: (n_layer, n_batch, n_head, seq_len, embed_size_per_head)
+        assert self.key_quantizer.level == "token"
+        assert self.value_quantizer.level == "token"
+        # Plot std of caches
+        plt.figure(figsize=(10, 6))
+        for name, cache in caches.items():
+            cache_std = cache[:,0,:,:,:].to(torch.float64).std(dim=(0, 1, 3)).detach().cpu().numpy()
+            plt.plot(cache_std, label=name)
+        plt.legend()
+        plt.title("Std of caches at different tokens")
+        plt.xlabel("Token index")
+        plt.ylabel("Std")
+        plt.tight_layout()
+        plt.savefig("figs/cache_std.png", dpi=400)
+        # Plot distribution of caches
+        print("(min/max/std/mean)")
+        plt.figure(figsize=(10, 2*len(caches)))
+        for idx, (name, cache) in enumerate(caches.items()):
+            # Do not use the first token because it is <s>.
+            cache = cache[:,0,:,1,:].reshape(-1).to(torch.float64).detach().cpu().numpy()
+            print(f"{name:30} {cache.min().item():.4f} {cache.max().item():.4f} {cache.std().item():.4f} {cache.mean().item():.4f}")
+            ax = plt.subplot(len(caches), 1, idx+1)
+            ax.hist(cache, bins=1000, range=(-5, 5))
+            ax.set_title(name)
+        plt.tight_layout()
+        plt.savefig("figs/cache_distribution.png", dpi=400)
