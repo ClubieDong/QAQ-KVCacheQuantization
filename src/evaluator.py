@@ -33,23 +33,24 @@ class Evaluator:
                  model: LlamaForCausalLM,
                  questions: list[Question],
                  key_quantizer: Quantizer,
-                 value_quantizer: Quantizer):
+                 value_quantizer: Quantizer,
+                 draw_cache_insights: bool):
         self.device = device
         self.model = model
         self.questions = questions
         self.key_quantizer = key_quantizer
         self.value_quantizer = value_quantizer
+        self.enable_draw_cache_insights = draw_cache_insights
     
     @cached_property
     def quantizer_name(self):
         return f"{self.key_quantizer.name} | {self.value_quantizer.name}"
     
     def _calc_tensor_error(self, tensor1: torch.Tensor, tensor2: torch.Tensor) -> float:
-        # TODO: MAE or MSE?
-        return (tensor1.to(self.device) - tensor2.to(self.device)).abs().mean().item()
+        return ((tensor1.to(self.device) - tensor2.to(self.device)) ** 2).mean().item()
 
     def _calc_attention_error(self, attention1: AttentionType, attention2: AttentionType) -> float:
-        return sum(self._calc_tensor_error(attn1, attn2) for attn1, attn2 in zip(attention1, attention2))
+        return sum(self._calc_tensor_error(attn1, attn2) for attn1, attn2 in zip(attention1, attention2)) / len(attention1)
 
     def _evaluate_single(self, idx: int, question: Question) -> EvaluationResult:
         # Forward of question
@@ -60,7 +61,7 @@ class Evaluator:
         value_cache = torch.stack([value.to(self.device) for _, value in kvcache])
         quantized_key_cache, key_average_n_bits = self.key_quantizer.quantize(key_cache, attentions)
         quantized_value_cache, value_average_n_bits = self.value_quantizer.quantize(value_cache, attentions)
-        if idx == 0:
+        if self.enable_draw_cache_insights and idx == 0:
             self.draw_cache_insights({
                 "Key cache": key_cache,
                 "Quantized key cache": quantized_key_cache,
