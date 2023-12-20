@@ -3,7 +3,7 @@ import json
 import math
 import torch
 from tqdm import tqdm
-from typing import Optional
+from typing import Optional, Any
 from question import Question
 from matplotlib import pyplot as plt
 from torch.nn import functional as F
@@ -18,34 +18,47 @@ class EvaluationResult:
     accuracy: float = 0.0
     accuracy_confidence: float = 0.0
     answer_log_probability: float = 0.0
+    quantization_error: float = 0.0
     key_quantization_error: float = 0.0
     value_quantization_error: float = 0.0
     attention_error: float = 0.0
     logit_error: float = 0.0
+    average_n_bits: float = 0.0
     key_average_n_bits: float = 0.0
     value_average_n_bits: float = 0.0
+    average_size: float = 0.0
     key_average_size: float = 0.0
     value_average_size: float = 0.0
 
 
 class Evaluator:
-    def __init__(self, device: torch.device, 
+    def __init__(self, device: torch.device, version: str,
                  model: LlamaForCausalLM,
                  questions: list[Question],
                  key_quantizer: Quantizer,
                  value_quantizer: Quantizer,
                  draw_cache_insights: bool):
         self.device = device
+        self.version = version
         self.model = model
         self.questions = questions
         self.key_quantizer = key_quantizer
         self.value_quantizer = value_quantizer
         self.enable_draw_cache_insights = draw_cache_insights
-    
+        if draw_cache_insights:
+            assert self.key_quantizer.level == "token"
+            assert self.value_quantizer.level == "token"
+
     @cached_property
-    def quantizer_name(self):
-        return f"{self.key_quantizer.name} | {self.value_quantizer.name}"
-    
+    def params(self) -> dict[str, Any]:
+        res: dict[str, Any] = {}
+        res["version"] = self.version
+        res["model_name"] = self.model.name_or_path
+        res["question_count"] = len(self.questions)
+        res["key_quantizer"] = self.key_quantizer.params
+        res["value_quantizer"] = self.value_quantizer.params
+        return res
+
     def _calc_tensor_error(self, tensor1: torch.Tensor, tensor2: torch.Tensor) -> float:
         return ((tensor1.to(self.device) - tensor2.to(self.device)) ** 2).mean().item()
 
@@ -54,7 +67,7 @@ class Evaluator:
 
     def _evaluate_single(self, idx: int, question: Question) -> EvaluationResult:
         # Forward of question
-        result = self.model.forward(question.question, use_cache=True, output_attentions=True, return_dict=True)
+        result = self.model.forward(question.question.to(self.device), use_cache=True, output_attentions=True, return_dict=True)
         kvcache, attentions, logits = result.past_key_values, result.attentions, result.logits
         # Quantize key/value cache
         key_cache = torch.stack([key.to(self.device) for key, _ in kvcache])
@@ -75,8 +88,9 @@ class Evaluator:
         kvcache = [(key.expand(len(question.choices), -1, -1, -1), value.expand(len(question.choices), -1, -1, -1)) for key, value in kvcache]
         # Forward of choices
         first_word_log_softmax = F.log_softmax(logits[0, -1], dim=-1)
-        result = self.model.forward(question.choices, past_key_values=kvcache, use_cache=True, output_attentions=True, return_dict=True)
-        quantized_result = self.model.forward(question.choices, past_key_values=quantized_kvcache, use_cache=True, output_attentions=True, return_dict=True)
+        choices = question.choices.to(self.device)
+        result = self.model.forward(choices, past_key_values=kvcache, use_cache=True, output_attentions=True, return_dict=True)
+        quantized_result = self.model.forward(choices, past_key_values=quantized_kvcache, use_cache=True, output_attentions=True, return_dict=True)
         quantized_log_softmax = F.log_softmax(quantized_result.logits, dim=-1)
         # Calculate log probabilities
         max_log_probability, max_choice_idx, answer_log_probability = None, None, None
@@ -90,15 +104,22 @@ class Evaluator:
                 max_log_probability = quantized_log_probability
                 max_choice_idx = choice_idx
         # Calculate quantization metrics
+        key_quantization_error = self._calc_tensor_error(key_cache, quantized_key_cache)
+        value_quantization_error = self._calc_tensor_error(value_cache, quantized_value_cache)
+        key_average_size = self.key_quantizer.calc_quantized_cache_size_per_token(key_average_n_bits, self.model)
+        value_average_size = self.value_quantizer.calc_quantized_cache_size_per_token(value_average_n_bits, self.model)
         return EvaluationResult(
             accuracy=1.0 if max_choice_idx == question.answer_idx else 0.0,
             answer_log_probability=answer_log_probability,
-            key_quantization_error=self._calc_tensor_error(key_cache, quantized_key_cache),
-            value_quantization_error=self._calc_tensor_error(value_cache, quantized_value_cache),
+            quantization_error=(key_quantization_error + value_quantization_error) / 2,
+            key_quantization_error=key_quantization_error,
+            value_quantization_error=value_quantization_error,
             attention_error=self._calc_attention_error(result.attentions, quantized_result.attentions),
             logit_error=self._calc_tensor_error(result.logits, quantized_result.logits),
-            key_average_size=self.key_quantizer.calc_quantized_cache_size_per_token(key_average_n_bits, self.model),
-            value_average_size=self.value_quantizer.calc_quantized_cache_size_per_token(value_average_n_bits, self.model),
+            average_size=(key_average_size + value_average_size) / 2,
+            key_average_size=key_average_size,
+            value_average_size=value_average_size,
+            average_n_bits=(key_average_n_bits + value_average_n_bits) / 2,
             key_average_n_bits=key_average_n_bits,
             value_average_n_bits=value_average_n_bits,
         )
@@ -113,24 +134,30 @@ class Evaluator:
                 total_tokens += n_tokens
                 result.accuracy += single_result.accuracy
                 result.answer_log_probability += single_result.answer_log_probability
+                result.quantization_error += single_result.quantization_error
                 result.key_quantization_error += single_result.key_quantization_error
                 result.value_quantization_error += single_result.value_quantization_error
                 result.attention_error += single_result.attention_error
                 result.logit_error += single_result.logit_error
+                result.average_size += single_result.average_size * n_tokens
                 result.key_average_size += single_result.key_average_size * n_tokens
                 result.value_average_size += single_result.value_average_size * n_tokens
+                result.average_n_bits += single_result.average_n_bits * n_tokens
                 result.key_average_n_bits += single_result.key_average_n_bits * n_tokens
                 result.value_average_n_bits += single_result.value_average_n_bits * n_tokens
         result.accuracy /= len(self.questions)
         # Calculate 95% confidence interval
         result.accuracy_confidence = 1.96 * math.sqrt(result.accuracy * (1.0 - result.accuracy) / len(self.questions))
         result.answer_log_probability /= len(self.questions)
+        result.quantization_error /= len(self.questions)
         result.key_quantization_error /= len(self.questions)
         result.value_quantization_error /= len(self.questions)
         result.attention_error /= len(self.questions)
         result.logit_error /= len(self.questions)
+        result.average_size /= total_tokens
         result.key_average_size /= total_tokens
         result.value_average_size /= total_tokens
+        result.average_n_bits /= total_tokens
         result.key_average_n_bits /= total_tokens
         result.value_average_n_bits /= total_tokens
         return result
@@ -139,12 +166,16 @@ class Evaluator:
         if cache_file is not None and os.path.exists(cache_file):
             with open(cache_file, "r") as f:
                 cached_results = json.load(f)
-                if self.quantizer_name in cached_results:
-                    return EvaluationResult(**cached_results[self.quantizer_name])
+                for entry in cached_results:
+                    if entry["params"] == self.params:
+                        return EvaluationResult(**entry["results"])
         else:
-            cached_results = {}
+            cached_results = []
         result = self.evaluate(use_tqdm)
-        cached_results[self.quantizer_name] = asdict(result)
+        cached_results.append({
+            "params": self.params,
+            "results": asdict(result),
+        })
         if cache_file is not None:
             with open(cache_file, "w") as f:
                 json.dump(cached_results, f, indent=4, separators=(", ", ": "))

@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from scipy.stats import norm
 from itertools import product
-from typing import Literal, Optional
+from typing import Literal, Optional, Any
 from functools import cached_property
 from transformers import LlamaForCausalLM
 
@@ -25,7 +25,6 @@ class Quantizer:
                  # uniform: assume normalized cache values obbey uniform distribution between max value and min value
                  # normal: assume normalized cache values obbey standard normal distribution
                  method: Optional[QuantizationMethods] = None,
-                 # TODO: Auto determine outliers_ratio
                  # Percentage of outliers (including both lowest and highest)
                  outliers_ratio: Optional[float] = None,
                  # Whether to enable attention-aware quantization
@@ -44,7 +43,10 @@ class Quantizer:
                  n_bits_min: Optional[int] = None,
                  # (only applicable for attention-aware quantization)
                  # Maximum allowed quantization bits
-                 n_bits_max: Optional[int] = None):
+                 n_bits_max: Optional[int] = None,
+                 # (only applicable for attention-aware quantization of key cache)
+                 # Max value of query tensor used in the formula
+                 max_q_value: Optional[float] = None):
         # Set key_or_value_cache
         assert key_or_value_cache is not None
         self.key_or_value_cache = key_or_value_cache
@@ -88,6 +90,11 @@ class Quantizer:
             assert n_bits_max is not None
             assert n_bits_min <= n_bits_max <= 16
             self.n_bits_max = n_bits_max
+            if self.key_or_value_cache == "key":
+                # Set max_q_value
+                assert max_q_value is not None
+                assert max_q_value > 0
+                self.max_q_value = max_q_value
         else:
             # Set n_bits_uniform
             assert n_bits_uniform is not None
@@ -114,20 +121,26 @@ class Quantizer:
             }
 
     @cached_property
-    def name(self) -> str:
-        if self.key_or_value_cache == "key":
-            name = "Key("
-        elif self.key_or_value_cache == "value":
-            name = "Value("
+    def params(self) -> dict[str, Any]:
+        res: dict[str, Any] = {}
+        res["key_or_value_cache"] = self.key_or_value_cache
+        res["level"] = self.level
         if self.level == "no-quantization":
-            return name + "NoQuantization)"
-        name += f"level={self.level},symmetric={self.symmetric},method={self.method_name},outliers_ratio={self.outliers_ratio},attention-aware={self.use_attentions},"
+            return res
+        res["symmetric"] = self.symmetric
+        res["method_name"] = self.method_name
+        res["outliers_ratio"] = self.outliers_ratio
+        res["use_attentions"] = self.use_attentions
         if self.use_attentions:
-            name += f"n-bits-min={self.n_bits_min},n-bits-max={self.n_bits_max},last-n-attentions={self.last_n_attentions},target-error={self.target_quantization_error:.3f}"
+            res["n_bits_min"] = self.n_bits_min
+            res["n_bits_max"] = self.n_bits_max
+            res["last_n_attentions"] = self.last_n_attentions
+            res["target_quantization_error"] = self.target_quantization_error
+            if self.key_or_value_cache == "key":
+                res["max_q_value"] = self.max_q_value
         else:
-            name += f"n-bits-uniform={self.n_bits_uniform}"
-        name += ")"
-        return name
+            res["n_bits_uniform"] = self.n_bits_uniform
+        return res
 
     def _calc_quantization_bits(self, attentions: AttentionType, cache: torch.Tensor, outlier_mask: torch.Tensor) -> torch.Tensor:
         # cache/outlier_mask.shape: (n_batch, seq_len, n_layer, n_head, embed_size_per_head)
@@ -157,8 +170,7 @@ class Quantizer:
             # x.shape: (n_batch, seq_len) or (n_batch, n_layer, seq_len) or (n_batch, n_layer, n_head, seq_len)
             x = x.permute(0, -1, *range(1, len(x.shape) - 1))
             # x.shape: (n_batch, seq_len) or (n_batch, seq_len, n_layer) or (n_batch, seq_len, n_layer, n_head)
-            # TODO: MaxQ=3.0
-            max_error = math.sqrt(self.target_quantization_error/(embed_size_per_head*(seq_len**2))) / (3.0*x)
+            max_error = math.sqrt(self.target_quantization_error / embed_size_per_head) / seq_len / (self.max_q_value * x)
             # max_error.shape: (n_batch, seq_len) or (n_batch, seq_len, n_layer) or (n_batch, seq_len, n_layer, n_head)
         elif self.key_or_value_cache == "value":
             max_error = math.sqrt(self.target_quantization_error) / seq_len / torch.abs(attentions)

@@ -11,9 +11,10 @@ from transformers import LlamaForCausalLM, LlamaTokenizerFast
 model_name = "meta-llama/Llama-2-7b-hf"
 device = torch.device("cuda:0")
 dtype = torch.float16
-question_count = 800
-# cache_file = None
-cache_file = "cache/cache_05.json"
+question_count = 1000
+# Change version if you made breaking changes to the code so that the cached results will be invalidated.
+version = "2023/12/21-#01"
+cache_file = "cache/results.json"
 
 key_quantizer_configs = [{
     "key_or_value_cache": ["key"],
@@ -22,7 +23,7 @@ key_quantizer_configs = [{
     "level": ["token", "layer", "head"],
     "symmetric": [False],
     "outliers_ratio": [0.01],
-    "n_bits_uniform": [4],
+    "n_bits_uniform": [2, 3, 4, 6, 8],
 }, {
     "key_or_value_cache": ["key"],
     "use_attentions": [True],
@@ -39,6 +40,7 @@ key_quantizer_configs = [{
     ],
     "n_bits_min": [1, 2],
     "n_bits_max": [8],
+    "max_q_value": [3],
 }]
 value_quantizer_configs = [{
     "key_or_value_cache": ["value"],
@@ -47,7 +49,7 @@ value_quantizer_configs = [{
     "level": ["token", "layer", "head"],
     "symmetric": [False],
     "outliers_ratio": [0.01],
-    "n_bits_uniform": [4],
+    "n_bits_uniform": [2, 3, 4, 6, 8],
 }, {
     "key_or_value_cache": ["value"],
     "use_attentions": [True],
@@ -96,6 +98,7 @@ value_quantizer_configs = [{
 #     "target_quantization_error": [10000, 30000, 100000],
 #     "n_bits_min": [1],
 #     "n_bits_max": [8],
+#     "max_q_value": [3],
 # }]
 # value_quantizer_configs = [{
 #     "key_or_value_cache": ["value"],
@@ -121,20 +124,10 @@ def main():
     value_quantizers = build_quantizers(dtype, device, value_quantizer_configs)
     assert len(key_quantizers) == len(value_quantizers)
     print(f"Total # of evaluations: {len(key_quantizers)}")
-    for key_quantizer, value_quantizer in zip(key_quantizers, value_quantizers):
-        evaluator = Evaluator(device, model, questions, key_quantizer, value_quantizer, False)
-        result = evaluator.cached_evaluate(cache_file, use_tqdm=True)
-        print()
-        print(f"{evaluator.quantizer_name}:")
-        print(f"    Accuracy: {result.accuracy*100:.6f}%")
-        print(f"    95% confidence interval of accuracy: {result.accuracy_confidence:.6f}")
-        print(f"    Correct answer log probability: {result.answer_log_probability:.6f}")
-        print(f"    Quantization error of key cache: {result.key_quantization_error:.6f}")
-        print(f"    Quantization error of value cache: {result.value_quantization_error:.6f}")
-        print(f"    Average size of key cache per token: {result.key_average_size:.6f} bit")
-        print(f"    Average size of value cache per token: {result.value_average_size:.6f} bit")
-        print(f"    Attention error: {result.attention_error:.6f}")
-        print(f"    Logit error: {result.logit_error:.6f}")
+    for idx, (key_quantizer, value_quantizer) in enumerate(zip(key_quantizers, value_quantizers)):
+        print(f"Running evaluation #{idx+1}...")
+        evaluator = Evaluator(device, version, model, questions, key_quantizer, value_quantizer, False)
+        evaluator.cached_evaluate(cache_file, use_tqdm=True)
 
 
 if __name__ == "__main__":
