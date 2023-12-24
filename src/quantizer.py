@@ -3,9 +3,9 @@ import torch
 import numpy as np
 from scipy.stats import norm
 from itertools import product
-from typing import Literal, Optional, Any
 from functools import cached_property
 from transformers import LlamaForCausalLM
+from typing import Literal, Optional, Any
 
 
 AttentionType = list[torch.Tensor]
@@ -47,6 +47,8 @@ class Quantizer:
                  # (only applicable for attention-aware quantization of key cache)
                  # Max value of query tensor used in the formula
                  max_q_value: Optional[float] = None):
+        self.dtype = dtype
+        self.device = device
         # Set key_or_value_cache
         assert key_or_value_cache is not None
         self.key_or_value_cache = key_or_value_cache
@@ -55,8 +57,6 @@ class Quantizer:
         self.level = level
         if level == "no-quantization":
             return
-        self.dtype = dtype
-        self.device = device
         # Set level
         if level == "token":
             self.quantize_dims = (-3, -2, -1)
@@ -153,7 +153,7 @@ class Quantizer:
             elif self.level == "head":
                 shape = (n_batch, seq_len, n_layer, n_head)
             return torch.ones(shape, dtype=torch.int64, device=self.device) * self.n_bits_uniform
-        attentions = torch.stack([attn.to(self.device) for attn in attentions])
+        attentions = torch.stack(attentions)
         # attentions.shape: (n_layer, n_batch, n_head, seq_len, seq_len)
         attentions = attentions[:, :, :, -self.last_n_attentions:, :]
         # attentions.shape: (n_layer, n_batch, n_head, last_n_attentions, seq_len)
@@ -269,9 +269,9 @@ class Quantizer:
     # Returns (quantized kvcache, average n_bits)
     def quantize(self, cache: torch.Tensor, attentions: AttentionType) -> tuple[torch.Tensor, float]:
         if self.level == "no-quantization":
-            return cache, self.n_bits_uniform
+            return cache, torch.finfo(self.dtype).bits
         # cache.shape: (n_layer, n_batch, n_head, seq_len, embed_size_per_head)
-        cache = cache.permute(1, 3, 0, 2, 4).clone()
+        cache = cache.permute(1, 3, 0, 2, 4)
         # cache.shape: (n_batch, seq_len, n_layer, n_head, embed_size_per_head)
         outlier_mask = self._calc_outlier_mask(cache)
         # outlier_mask.shape: (n_batch, seq_len, n_layer, n_head, embed_size_per_head)
@@ -280,6 +280,7 @@ class Quantizer:
         average_n_bits = n_bits.mean(dtype=self.dtype).item()
         average_n_bits = average_n_bits * (1 - self.outliers_ratio) + torch.finfo(self.dtype).bits * self.outliers_ratio
         n_bits_min, n_bits_max = n_bits.min().item(), n_bits.max().item()
+        cache = cache.clone()
         for n in range(n_bits_min, n_bits_max+1):
             indices = torch.where(n_bits == n)
             cache[indices] = self.quantization_method(cache[indices], n_bits=n, outlier_mask=outlier_mask[indices])
@@ -290,7 +291,7 @@ class Quantizer:
     def calc_quantized_cache_size_per_token(self, average_n_bits: float, model: LlamaForCausalLM) -> float:
         cache_size = average_n_bits * model.config.num_hidden_layers * model.config.hidden_size
         default_n_bits = torch.finfo(self.dtype).bits
-        n_extra = 1 if self.symmetric else 2
+        n_extra = 0 if self.level == "no-quantization" else 1 if self.symmetric else 2
         if self.level == "no-quantization":
             extra_size = 0
         elif self.level == "token":

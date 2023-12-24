@@ -3,13 +3,13 @@ import json
 import math
 import torch
 from tqdm import tqdm
-from typing import Optional, Any
 from question import Question
-from matplotlib import pyplot as plt
+from typing import Optional, Any
 from torch.nn import functional as F
+from matplotlib import pyplot as plt
 from functools import cached_property
-from transformers import LlamaForCausalLM
 from dataclasses import dataclass, asdict
+from transformers import LlamaForCausalLM
 from quantizer import Quantizer, AttentionType
 
 
@@ -66,14 +66,17 @@ class Evaluator:
         return sum(self._calc_tensor_error(attn1, attn2) for attn1, attn2 in zip(attention1, attention2)) / len(attention1)
 
     def _evaluate_single(self, idx: int, question: Question) -> EvaluationResult:
-        # Forward of question
-        result = self.model.forward(question.question.to(self.device), use_cache=True, output_attentions=True, return_dict=True)
-        kvcache, attentions, logits = result.past_key_values, result.attentions, result.logits
+        question_len = question.question_length
+        # Forward before quantization
+        input_ids = question.input_ids.to(self.device)
+        result = self.model.forward(input_ids, use_cache=True, output_attentions=True, return_dict=True)
         # Quantize key/value cache
-        key_cache = torch.stack([key.to(self.device) for key, _ in kvcache])
-        value_cache = torch.stack([value.to(self.device) for _, value in kvcache])
-        quantized_key_cache, key_average_n_bits = self.key_quantizer.quantize(key_cache, attentions)
-        quantized_value_cache, value_average_n_bits = self.value_quantizer.quantize(value_cache, attentions)
+        question_attentions = [attn[:,:,:question_len,:question_len].to(self.device) for attn in result.attentions]
+        key_cache = torch.stack([key[:,:,:question_len,:].to(self.device) for key, _ in result.past_key_values])
+        value_cache = torch.stack([value[:,:,:question_len,:].to(self.device) for _, value in result.past_key_values])
+        quantized_key_cache, key_average_n_bits = self.key_quantizer.quantize(key_cache, question_attentions)
+        quantized_value_cache, value_average_n_bits = self.value_quantizer.quantize(value_cache, question_attentions)
+        quantized_kvcache = list(zip(quantized_key_cache, quantized_value_cache))
         if self.enable_draw_cache_insights and idx == 0:
             self.draw_cache_insights({
                 "Key cache": key_cache,
@@ -81,23 +84,16 @@ class Evaluator:
                 "Value cache": value_cache,
                 "Quantized value cache": quantized_value_cache,
             })
-        quantized_kvcache = [
-            (key.expand(len(question.choices), -1, -1, -1), value.expand(len(question.choices), -1, -1, -1))
-            for key, value in zip(quantized_key_cache, quantized_value_cache)
-        ]
-        kvcache = [(key.expand(len(question.choices), -1, -1, -1), value.expand(len(question.choices), -1, -1, -1)) for key, value in kvcache]
-        # Forward of choices
-        first_word_log_softmax = F.log_softmax(logits[0, -1], dim=-1)
-        choices = question.choices.to(self.device)
-        result = self.model.forward(choices, past_key_values=kvcache, use_cache=True, output_attentions=True, return_dict=True)
-        quantized_result = self.model.forward(choices, past_key_values=quantized_kvcache, use_cache=True, output_attentions=True, return_dict=True)
-        quantized_log_softmax = F.log_softmax(quantized_result.logits, dim=-1)
+        # Forward after quantization
+        quantized_result = self.model.forward(input_ids[:,question_len:], past_key_values=quantized_kvcache, use_cache=True, output_attentions=True, return_dict=True)
         # Calculate log probabilities
+        first_word_log_softmax = F.log_softmax(result.logits[:,question_len-1], dim=-1)
+        quantized_log_softmax = F.log_softmax(quantized_result.logits, dim=-1)
         max_log_probability, max_choice_idx, answer_log_probability = None, None, None
-        for choice_idx, choice_length in enumerate(question.choice_length):
-            quantized_log_probability = first_word_log_softmax[question.choices[choice_idx, 0]]
-            quantized_log_probability += quantized_log_softmax[choice_idx, torch.arange(choice_length - 1), question.choices[choice_idx, 1:choice_length]].sum()
-            quantized_log_probability = quantized_log_probability.item() / choice_length
+        for choice_idx, choice_len in enumerate(question.choice_length):
+            quantized_log_probability = first_word_log_softmax[choice_idx, input_ids[choice_idx, question_len]].item()
+            quantized_log_probability += quantized_log_softmax[choice_idx, torch.arange(choice_len-1), input_ids[choice_idx,question_len+1:question_len+choice_len]].sum().item()
+            quantized_log_probability /= choice_len
             if choice_idx == question.answer_idx:
                 answer_log_probability = quantized_log_probability
             if max_log_probability is None or quantized_log_probability > max_log_probability:
@@ -106,6 +102,11 @@ class Evaluator:
         # Calculate quantization metrics
         key_quantization_error = self._calc_tensor_error(key_cache, quantized_key_cache)
         value_quantization_error = self._calc_tensor_error(value_cache, quantized_value_cache)
+        attention_error = self._calc_attention_error(
+            [attn[:,:,question_len:,:question_len].to(self.device) for attn in result.attentions],
+            [attn[:,:,:,:question_len].to(self.device) for attn in quantized_result.attentions],
+        )
+        logit_error = self._calc_tensor_error(result.logits[:,question_len:,:], quantized_result.logits)
         key_average_size = self.key_quantizer.calc_quantized_cache_size_per_token(key_average_n_bits, self.model)
         value_average_size = self.value_quantizer.calc_quantized_cache_size_per_token(value_average_n_bits, self.model)
         return EvaluationResult(
@@ -114,8 +115,8 @@ class Evaluator:
             quantization_error=(key_quantization_error + value_quantization_error) / 2,
             key_quantization_error=key_quantization_error,
             value_quantization_error=value_quantization_error,
-            attention_error=self._calc_attention_error(result.attentions, quantized_result.attentions),
-            logit_error=self._calc_tensor_error(result.logits, quantized_result.logits),
+            attention_error=attention_error,
+            logit_error=logit_error,
             average_size=(key_average_size + value_average_size) / 2,
             key_average_size=key_average_size,
             value_average_size=value_average_size,
@@ -130,7 +131,7 @@ class Evaluator:
         with torch.no_grad():
             for idx, question in enumerate(tqdm(self.questions) if use_tqdm else self.questions):
                 single_result = self._evaluate_single(idx, question)
-                n_tokens = question.question.shape[1]
+                n_tokens = question.question_length
                 total_tokens += n_tokens
                 result.accuracy += single_result.accuracy
                 result.answer_log_probability += single_result.answer_log_probability

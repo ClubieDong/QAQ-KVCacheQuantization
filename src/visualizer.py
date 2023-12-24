@@ -3,7 +3,7 @@ from tqdm import tqdm
 from matplotlib import pyplot as plt
 
 cache_file = "cache/results.json"
-version = "2023/12/21-#01"
+version = "2023/12/24-#01"
 model_name = "meta-llama/Llama-2-7b-hf"
 min_question_count = 1000
 
@@ -53,12 +53,16 @@ translation = {
 def visualize_results():
     with open(cache_file, "r") as f:
         cached_results = json.load(f)
+    version_warned = False
     plt.figure(figsize=(5*len(relations), 5*2*len(params)))
     for param_idx, param_name in enumerate(tqdm(params)):
         for relation_idx, (metric_name_x, metric_name_y) in enumerate(relations):
             key_x, key_y, value_x, value_y = {}, {}, {}, {}
             for entry in cached_results:
                 p, r = entry["params"], entry["results"]
+                if not version_warned and p["version"] > version:
+                    print("Warning: A newer version detected. Did you forget to update the version in `visualizer.py`?")
+                    version_warned = True
                 if p["version"] != version:
                     continue
                 if p["model_name"] != model_name:
@@ -101,7 +105,7 @@ def visualize_results():
             ax.set_box_aspect(1)
     print(f"Rendering {2*len(params)*len(relations)} figures, it may take about 30 seconds...")
     plt.tight_layout()
-    plt.savefig("figs/result.png", dpi=100)
+    plt.savefig("figs/results.png", dpi=100)
 
 
 if __name__ == "__main__":
