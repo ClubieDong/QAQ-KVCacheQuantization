@@ -1,4 +1,5 @@
-from .base import Experiment, device
+from typing import Any
+from .base import Experiment
 from itertools import chain, product
 from matplotlib import pyplot as plt
 from functools import cached_property
@@ -9,7 +10,7 @@ from quantizer import Quantizer, build_quantizers
 class KeyValueDifference(Experiment):
     @cached_property
     def quantizer_list(self) -> list[tuple[Quantizer, Quantizer]]:
-        key_quantizers_1 = build_quantizers(self.dtype, device, [{
+        key_quantizers_1 = build_quantizers([{
             "key_or_value_cache": ["key"],
             "use_attentions": [False],
             "method": ["uniform"],
@@ -18,15 +19,15 @@ class KeyValueDifference(Experiment):
             "outliers_ratio": [0],
             "n_bits_uniform": [1, 2, 3, 4, 5, 6, 7, 8],
         }])
-        value_quantizers_1 = build_quantizers(self.dtype, device, [{
+        value_quantizers_1 = build_quantizers([{
             "key_or_value_cache": ["value"],
             "level": ["no-quantization"],
         }])
-        key_quantizers_2 = build_quantizers(self.dtype, device, [{
+        key_quantizers_2 = build_quantizers([{
             "key_or_value_cache": ["key"],
             "level": ["no-quantization"],
         }])
-        value_quantizers_2 = build_quantizers(self.dtype, device, [{
+        value_quantizers_2 = build_quantizers([{
             "key_or_value_cache": ["value"],
             "use_attentions": [False],
             "method": ["uniform"],
@@ -35,7 +36,10 @@ class KeyValueDifference(Experiment):
             "outliers_ratio": [0],
             "n_bits_uniform": [1, 2, 3, 4, 5, 6, 7, 8],
         }])
-        return list(chain(product(key_quantizers_1, value_quantizers_1), product(key_quantizers_2, value_quantizers_2)))
+        return list(chain(
+            product(key_quantizers_1, value_quantizers_1),
+            product(key_quantizers_2, value_quantizers_2),
+        ))
 
     def process_result(self, results: list[EvaluationResult]):
         enabled_series = ["token", "layer", "head"]

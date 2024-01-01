@@ -32,15 +32,16 @@ class EvaluationResult:
 
 
 class Evaluator:
-    def __init__(self, device: torch.device, version: str,
-                 model: LlamaForCausalLM,
+    def __init__(self, device: torch.device,
+                 version: str,
+                 model_name: str,
                  questions: list[Question],
                  key_quantizer: Quantizer,
                  value_quantizer: Quantizer,
                  draw_cache_insights: bool):
         self.device = device
         self.version = version
-        self.model = model
+        self.model_name = model_name
         self.questions = questions
         self.key_quantizer = key_quantizer
         self.value_quantizer = value_quantizer
@@ -53,7 +54,7 @@ class Evaluator:
     def params(self) -> dict[str, Any]:
         res: dict[str, Any] = {}
         res["version"] = self.version
-        res["model_name"] = self.model.name_or_path
+        res["model_name"] = self.model_name
         res["question_count"] = len(self.questions)
         res["key_quantizer"] = self.key_quantizer.params
         res["value_quantizer"] = self.value_quantizer.params
@@ -65,11 +66,11 @@ class Evaluator:
     def _calc_attention_error(self, attention1: AttentionType, attention2: AttentionType) -> float:
         return sum(self._calc_tensor_error(attn1, attn2) for attn1, attn2 in zip(attention1, attention2)) / len(attention1)
 
-    def _evaluate_single(self, idx: int, question: Question) -> EvaluationResult:
+    def _evaluate_single(self, model: LlamaForCausalLM, idx: int, question: Question) -> EvaluationResult:
         question_len = question.question_length
         # Forward before quantization
         input_ids = question.input_ids.to(self.device)
-        result = self.model.forward(input_ids, use_cache=True, output_attentions=True, return_dict=True)
+        result = model.forward(input_ids, use_cache=True, output_attentions=True, return_dict=True)
         # Quantize key/value cache
         question_attentions = [attn[:,:,:question_len,:question_len].to(self.device) for attn in result.attentions]
         key_cache = torch.stack([key[:,:,:question_len,:].to(self.device) for key, _ in result.past_key_values])
@@ -85,7 +86,7 @@ class Evaluator:
                 "Quantized value cache": quantized_value_cache,
             })
         # Forward after quantization
-        quantized_result = self.model.forward(input_ids[:,question_len:], past_key_values=quantized_kvcache, use_cache=True, output_attentions=True, return_dict=True)
+        quantized_result = model.forward(input_ids[:,question_len:], past_key_values=quantized_kvcache, use_cache=True, output_attentions=True, return_dict=True)
         # Calculate log probabilities
         first_word_log_softmax = F.log_softmax(result.logits[:,question_len-1], dim=-1)
         quantized_log_softmax = F.log_softmax(quantized_result.logits, dim=-1)
@@ -107,8 +108,8 @@ class Evaluator:
             [attn[:,:,:,:question_len].to(self.device) for attn in quantized_result.attentions],
         )
         logit_error = self._calc_tensor_error(result.logits[:,question_len:,:], quantized_result.logits)
-        key_average_size = self.key_quantizer.calc_quantized_cache_size_per_token(key_average_n_bits, self.model)
-        value_average_size = self.value_quantizer.calc_quantized_cache_size_per_token(value_average_n_bits, self.model)
+        key_average_size = self.key_quantizer.calc_quantized_cache_size_per_token(key_average_n_bits, model)
+        value_average_size = self.value_quantizer.calc_quantized_cache_size_per_token(value_average_n_bits, model)
         return EvaluationResult(
             accuracy=1.0 if max_choice_idx == question.answer_idx else 0.0,
             answer_log_probability=answer_log_probability,
@@ -125,12 +126,13 @@ class Evaluator:
             value_average_n_bits=value_average_n_bits,
         )
 
-    def evaluate(self, use_tqdm: bool) -> EvaluationResult:
+    def evaluate(self, model: LlamaForCausalLM, use_tqdm: bool) -> EvaluationResult:
+        assert model.name_or_path == self.model_name
         result = EvaluationResult()
         total_tokens = 0
         with torch.no_grad():
             for idx, question in enumerate(tqdm(self.questions) if use_tqdm else self.questions):
-                single_result = self._evaluate_single(idx, question)
+                single_result = self._evaluate_single(model, idx, question)
                 n_tokens = question.question_length
                 total_tokens += n_tokens
                 result.accuracy += single_result.accuracy
@@ -162,24 +164,38 @@ class Evaluator:
         result.key_average_n_bits /= total_tokens
         result.value_average_n_bits /= total_tokens
         return result
+    
+    def is_result_cached(self, cache_file: Optional[str]) -> Optional[EvaluationResult]:
+        if cache_file is None or not os.path.exists(cache_file):
+            return None
+        with open(cache_file, "r") as f:
+            cached_results = json.load(f)
+            for entry in cached_results:
+                if entry["params"] == self.params:
+                    return EvaluationResult(**entry["results"])
+        return None
 
-    def cached_evaluate(self, cache_file: Optional[str], use_tqdm: bool) -> EvaluationResult:
-        if cache_file is not None and os.path.exists(cache_file):
+    def cache_result(self, cache_file: Optional[str], result: EvaluationResult):
+        if cache_file is None:
+            return
+        if os.path.exists(cache_file):
             with open(cache_file, "r") as f:
                 cached_results = json.load(f)
-                for entry in cached_results:
-                    if entry["params"] == self.params:
-                        return EvaluationResult(**entry["results"])
         else:
             cached_results = []
-        result = self.evaluate(use_tqdm)
         cached_results.append({
             "params": self.params,
             "results": asdict(result),
         })
-        if cache_file is not None:
-            with open(cache_file, "w") as f:
-                json.dump(cached_results, f, indent=4, separators=(", ", ": "))
+        with open(cache_file, "w") as f:
+            json.dump(cached_results, f, indent=4, separators=(", ", ": "))
+
+    def cached_evaluate(self, model: LlamaForCausalLM, cache_file: Optional[str], use_tqdm: bool) -> EvaluationResult:
+        result = self.is_result_cached(cache_file)
+        if result is not None:
+            return result
+        result = self.evaluate(model, use_tqdm)
+        self.cache_result(cache_file, result)
         return result
 
     def draw_cache_insights(self, caches: dict[str, torch.Tensor]) -> None:

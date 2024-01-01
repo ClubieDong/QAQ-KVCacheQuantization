@@ -1,6 +1,7 @@
 import re
 import torch
 import random
+from config import hf_cache_dir
 from datasets import load_dataset
 from dataclasses import dataclass
 from transformers import LlamaTokenizerFast
@@ -26,7 +27,7 @@ def preprocess_text(text: str) -> str:
 
 
 def load_questions(tokenizer: LlamaTokenizerFast, question_count: int):
-    raw_dataset: list[dict[str, str]] = list(load_dataset("Rowan/hellaswag", split="validation"))
+    raw_dataset: list[dict[str, str]] = list(load_dataset("Rowan/hellaswag", split="validation", cache_dir=hf_cache_dir))
     print("Dataset loaded!")
     random.seed(42)
     raw_dataset = random.sample(raw_dataset, k=question_count)

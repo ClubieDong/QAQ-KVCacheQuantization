@@ -4,8 +4,8 @@ import numpy as np
 from scipy.stats import norm
 from itertools import product
 from functools import cached_property
-from transformers import LlamaForCausalLM
 from typing import Literal, Optional, Any
+from transformers import LlamaForCausalLM
 
 
 AttentionType = list[torch.Tensor]
@@ -14,7 +14,7 @@ QuantizationMethods = Literal["uniform", "normal"]
 
 
 class Quantizer:
-    def __init__(self, dtype: torch.dtype, device: torch.device,
+    def __init__(self,
                  # Key cache or value cache
                  key_or_value_cache: Optional[Literal["key", "value"]] = None,
                  # no-quantization, token-level, layer-level, or head-level
@@ -47,8 +47,6 @@ class Quantizer:
                  # (only applicable for attention-aware quantization of key cache)
                  # Max value of query tensor used in the formula
                  max_q_value: Optional[float] = None):
-        self.dtype = dtype
-        self.device = device
         # Set key_or_value_cache
         assert key_or_value_cache is not None
         self.key_or_value_cache = key_or_value_cache
@@ -107,10 +105,15 @@ class Quantizer:
             self.quantization_method = self._uniform_quantize
         elif method == "normal":
             self.quantization_method = self._normal_quantize
-            if use_attentions:
-                n_bits_range = range(n_bits_min, n_bits_max+1)
+
+    def set_dtype_and_device(self, dtype: torch.dtype, device: torch.device):
+        self.dtype = dtype
+        self.device = device
+        if self.level != "no-quantization" and self.method_name == "normal":
+            if self.use_attentions:
+                n_bits_range = range(self.n_bits_min, self.n_bits_max+1)
             else:
-                n_bits_range = range(n_bits_uniform, n_bits_uniform+1)
+                n_bits_range = range(self.n_bits_uniform, self.n_bits_uniform+1)
             self.normal_quantiles_upper_bound = {
                 n: torch.tensor(norm.ppf(np.arange(0, 1, 1/(2**n)) + 1/(2**n)), dtype=dtype, device=device)
                 for n in n_bits_range
@@ -303,10 +306,10 @@ class Quantizer:
         return cache_size + extra_size
 
 
-def build_quantizers(dtype: torch.dtype, device: torch.device, config_grid_list: list[dict[str, list]]) -> list[Quantizer]:
+def build_quantizers(config_grid_list: list[dict[str, list]]) -> list[Quantizer]:
     quantizer_list: list[Quantizer] = []
     for config_grid in config_grid_list:
         for args in product(*config_grid.values()):
             kwargs = {k: v for k, v in zip(config_grid.keys(), args)}
-            quantizer_list.append(Quantizer(dtype, device, **kwargs))
+            quantizer_list.append(Quantizer(**kwargs))
     return quantizer_list
