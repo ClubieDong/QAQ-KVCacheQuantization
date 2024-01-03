@@ -1,4 +1,5 @@
 /cache/
 /figs/
+/data/
 __pycache__/
 .vscode/

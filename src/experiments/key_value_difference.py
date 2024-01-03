@@ -1,4 +1,3 @@
-from typing import Any
 from .base import Experiment
 from itertools import chain, product
 from matplotlib import pyplot as plt

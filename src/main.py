@@ -1,6 +1,6 @@
 import os
 import torch
-from experiments import KeyValueDifference
+from experiments import *
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
@@ -11,4 +11,5 @@ question_count = 1000
 
 
 if __name__ == "__main__":
-    KeyValueDifference(model_name, dtype, question_count, verbose=True).run()
+    # KeyValueDifference(model_name, dtype, question_count, parallel=True, verbose=True).run()
+    KVcacheDistribution(model_name, dtype, question_count, parallel=True, verbose=True).run()

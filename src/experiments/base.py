@@ -14,10 +14,11 @@ from transformers import LlamaConfig, LlamaForCausalLM, LlamaTokenizerFast
 
 
 class Experiment(abc.ABC):
-    def __init__(self, model_name: str, dtype: torch.dtype, question_count: int, verbose: bool):
+    def __init__(self, model_name: str, dtype: torch.dtype, question_count: int, parallel: bool, verbose: bool):
         self.model_name = model_name
         self.dtype = dtype
         self.question_count = question_count
+        self.parallel = parallel
         self.verbose = verbose
 
     @cached_property
@@ -27,7 +28,7 @@ class Experiment(abc.ABC):
         return tokenizer
 
     @cache
-    def model(self, worker_id: int) -> LlamaForCausalLM:
+    def get_model(self, worker_id: int) -> LlamaForCausalLM:
         with init_empty_weights():
             model = LlamaForCausalLM(LlamaConfig.from_pretrained(self.model_name, cache_dir=hf_cache_dir))
         _, max_memory = device_configs[worker_id]
@@ -41,9 +42,9 @@ class Experiment(abc.ABC):
     def questions(self) -> list[Question]:
         return load_questions(self.tokenizer, self.question_count)
 
-    @abc.abstractproperty
+    @cached_property
     def quantizer_list(self) -> list[tuple[Quantizer, Quantizer]]:
-        pass
+        return []
 
     @abc.abstractmethod
     def process_result(self, results: list[EvaluationResult]):
@@ -52,7 +53,7 @@ class Experiment(abc.ABC):
     def _is_all_cached(self) -> Optional[list[EvaluationResult]]:
         results: list[EvaluationResult] = []
         for key_quantizer, value_quantizer in self.quantizer_list:
-            evaluator = Evaluator("cpu", version, self.model_name, self.questions, key_quantizer, value_quantizer, False)
+            evaluator = Evaluator("cpu", version, self.model_name, self.questions, key_quantizer, value_quantizer)
             result = evaluator.is_result_cached(cache_file)
             if result is None:
                 return None
@@ -61,13 +62,16 @@ class Experiment(abc.ABC):
 
     def _run_single_evaluation(self, idx, quantizers: tuple[Quantizer, Quantizer]) -> EvaluationResult:
         key_quantizer, value_quantizer = quantizers
-        worker_id = current_process()._identity[0] - 1
+        if self.parallel:
+            worker_id = current_process()._identity[0] - 1
+        else:
+            worker_id = 0
         print(f"Running evaluation #{idx+1} on worker #{worker_id+1}...")
         device, _ = device_configs[worker_id]
-        model = self.model(worker_id)
+        model = self.get_model(worker_id)
         key_quantizer.set_dtype_and_device(self.dtype, device)
         value_quantizer.set_dtype_and_device(self.dtype, device)
-        evaluator = Evaluator(device, version, self.model_name, self.questions, key_quantizer, value_quantizer, False)
+        evaluator = Evaluator(device, version, self.model_name, self.questions, key_quantizer, value_quantizer)
         result = evaluator.cached_evaluate(model, cache_file, use_tqdm=True)
         if self.verbose:
             print(f"  Params: {evaluator.params}")
@@ -78,10 +82,17 @@ class Experiment(abc.ABC):
     def run(self):
         results = self._is_all_cached()
         if results is None:
-            _, _ = self.questions, self.tokenizer
-            chunk_size = int(math.ceil(len(self.quantizer_list) / len(device_configs)))
-            with Pool(len(device_configs)) as pool:
-                results = pool.starmap(self._run_single_evaluation, enumerate(self.quantizer_list), chunksize=chunk_size)
+            results = []
+            if len(self.quantizer_list) == 0:
+                print("Warning: No quantizers are specified!")
+            elif self.parallel:
+                _, _ = self.questions, self.tokenizer
+                chunk_size = int(math.ceil(len(self.quantizer_list) / len(device_configs)))
+                with Pool(len(device_configs)) as pool:
+                    results = pool.starmap(self._run_single_evaluation, enumerate(self.quantizer_list), chunksize=chunk_size)
+            else:
+                for idx, quantizers in enumerate(self.quantizer_list):
+                    results.append(self._run_single_evaluation(idx, quantizers))
         self.process_result(results)
 
 
