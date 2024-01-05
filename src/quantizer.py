@@ -45,8 +45,8 @@ class Quantizer:
                  # Maximum allowed quantization bits
                  n_bits_max: Optional[int] = None,
                  # (only applicable for attention-aware quantization of key cache)
-                 # Max value of query tensor used in the formula
-                 max_q_value: Optional[float] = None):
+                 # 2-norm of query tensor used in the formula
+                 q_norm: Optional[float] = None):
         # Set key_or_value_cache
         assert key_or_value_cache is not None
         self.key_or_value_cache = key_or_value_cache
@@ -89,10 +89,10 @@ class Quantizer:
             assert n_bits_min <= n_bits_max <= 16
             self.n_bits_max = n_bits_max
             if self.key_or_value_cache == "key":
-                # Set max_q_value
-                assert max_q_value is not None
-                assert max_q_value > 0
-                self.max_q_value = max_q_value
+                # Set q_norm
+                assert q_norm is not None
+                assert q_norm > 0
+                self.q_norm = q_norm
         else:
             # Set n_bits_uniform
             assert n_bits_uniform is not None
@@ -140,14 +140,14 @@ class Quantizer:
             res["last_n_attentions"] = self.last_n_attentions
             res["target_quantization_error"] = self.target_quantization_error
             if self.key_or_value_cache == "key":
-                res["max_q_value"] = self.max_q_value
+                res["q_norm"] = self.q_norm
         else:
             res["n_bits_uniform"] = self.n_bits_uniform
         return res
 
     def _calc_quantization_bits(self, attentions: AttentionType, cache: torch.Tensor, outlier_mask: torch.Tensor) -> torch.Tensor:
         # cache/outlier_mask.shape: (n_batch, seq_len, n_layer, n_head, embed_size_per_head)
-        n_batch, seq_len, n_layer, n_head, embed_size_per_head = cache.shape
+        n_batch, seq_len, n_layer, n_head, _ = cache.shape
         if not self.use_attentions:
             if self.level == "token":
                 shape = (n_batch, seq_len)
@@ -156,27 +156,19 @@ class Quantizer:
             elif self.level == "head":
                 shape = (n_batch, seq_len, n_layer, n_head)
             return torch.ones(shape, dtype=torch.int64, device=self.device) * self.n_bits_uniform
-        attentions = torch.stack(attentions)
-        # attentions.shape: (n_layer, n_batch, n_head, seq_len, seq_len)
-        attentions = attentions[:, :, :, -self.last_n_attentions:, :]
-        # attentions.shape: (n_layer, n_batch, n_head, last_n_attentions, seq_len)
-        attentions = attentions.permute(1, 4, 0, 2, 3)
-        # attentions.shape: (n_batch, seq_len, n_layer, n_head, last_n_attentions)
-        attentions = attentions.amax(dim=self.quantize_dims)
-        # attentions.shape: (n_batch, seq_len) or (n_batch, seq_len, n_layer) or (n_batch, seq_len, n_layer, n_head)
         if self.key_or_value_cache == "key":
-            x = attentions.permute(0, *range(2, len(attentions.shape)), 1)
-            # x.shape: (n_batch, seq_len) or (n_batch, n_layer, seq_len) or (n_batch, n_layer, n_head, seq_len)
-            x = torch.diag_embed(x) - (x.view(*x.shape, 1) @ x.view(*x.shape, 1).transpose(-1, -2))
-            # x.shape: (n_batch, seq_len, seq_len) or (n_batch, n_layer, seq_len, seq_len) or (n_batch, n_layer, n_head, seq_len, seq_len)
-            x = torch.amax(torch.abs(x), dim=-1)
-            # x.shape: (n_batch, seq_len) or (n_batch, n_layer, seq_len) or (n_batch, n_layer, n_head, seq_len)
-            x = x.permute(0, -1, *range(1, len(x.shape) - 1))
-            # x.shape: (n_batch, seq_len) or (n_batch, seq_len, n_layer) or (n_batch, seq_len, n_layer, n_head)
-            max_error = math.sqrt(self.target_quantization_error / embed_size_per_head) / seq_len / (self.max_q_value * x)
+            max_error = math.sqrt(12.0 / self.q_norm * math.log(seq_len**3/(seq_len-1) * self.target_quantization_error**2 + 1))
             # max_error.shape: (n_batch, seq_len) or (n_batch, seq_len, n_layer) or (n_batch, seq_len, n_layer, n_head)
         elif self.key_or_value_cache == "value":
-            max_error = math.sqrt(self.target_quantization_error) / seq_len / torch.abs(attentions)
+            attentions = torch.stack(attentions)
+            # attentions.shape: (n_layer, n_batch, n_head, seq_len, seq_len)
+            attentions = attentions[:, :, :, -self.last_n_attentions:, :]
+            # attentions.shape: (n_layer, n_batch, n_head, last_n_attentions, seq_len)
+            attentions = attentions.permute(1, 4, 0, 2, 3)
+            # attentions.shape: (n_batch, seq_len, n_layer, n_head, last_n_attentions)
+            attentions = attentions.amax(dim=self.quantize_dims)
+            # attentions.shape: (n_batch, seq_len) or (n_batch, seq_len, n_layer) or (n_batch, seq_len, n_layer, n_head)
+            max_error = math.sqrt(12.0 / seq_len) * self.target_quantization_error / attentions
             # max_error.shape: (n_batch, seq_len) or (n_batch, seq_len, n_layer) or (n_batch, seq_len, n_layer, n_head)
         cache = torch.masked.masked_tensor(cache, torch.logical_not(outlier_mask))
         # NOTE: PyTorch's bug: https://github.com/pytorch/pytorch/issues/115624

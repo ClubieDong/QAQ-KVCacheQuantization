@@ -49,16 +49,6 @@ class Experiment(abc.ABC):
     @abc.abstractmethod
     def process_result(self, results: list[EvaluationResult]):
         pass
-    
-    def _is_all_cached(self) -> Optional[list[EvaluationResult]]:
-        results: list[EvaluationResult] = []
-        for key_quantizer, value_quantizer in self.quantizer_list:
-            evaluator = Evaluator("cpu", version, self.model_name, self.questions, key_quantizer, value_quantizer)
-            result = evaluator.is_result_cached(cache_file)
-            if result is None:
-                return None
-            results.append(result)
-        return results
 
     def _run_single_evaluation(self, idx, quantizers: tuple[Quantizer, Quantizer]) -> EvaluationResult:
         key_quantizer, value_quantizer = quantizers
@@ -80,17 +70,23 @@ class Experiment(abc.ABC):
         return result
 
     def run(self):
-        results = self._is_all_cached()
-        if results is None:
-            results = []
-            if len(self.quantizer_list) == 0:
-                print("Warning: No quantizers are specified!")
-            elif self.parallel:
-                _, _ = self.questions, self.tokenizer
-                chunk_size = int(math.ceil(len(self.quantizer_list) / len(device_configs)))
-                with Pool(len(device_configs)) as pool:
-                    results = pool.starmap(self._run_single_evaluation, enumerate(self.quantizer_list), chunksize=chunk_size)
-            else:
-                for idx, quantizers in enumerate(self.quantizer_list):
-                    results.append(self._run_single_evaluation(idx, quantizers))
+        results: list[Optional[EvaluationResult]] = []
+        for key_quantizer, value_quantizer in self.quantizer_list:
+            evaluator = Evaluator("cpu", version, self.model_name, self.questions, key_quantizer, value_quantizer)
+            result = evaluator.is_result_cached(cache_file)
+            results.append(result)
+        uncached_idx = [idx for idx, result in enumerate(results) if result is None]
+        uncached_quantizer_list = [self.quantizer_list[idx] for idx in uncached_idx]
+        if self.parallel and len(uncached_quantizer_list) > 0:
+            _, _ = self.questions, self.tokenizer
+            chunk_size = int(math.ceil(len(uncached_quantizer_list) / len(device_configs)))
+            with Pool(len(device_configs)) as pool:
+                uncached_results = pool.starmap(self._run_single_evaluation, enumerate(uncached_quantizer_list), chunksize=chunk_size)
+        else:
+            uncached_results = []
+            for idx, quantizers in enumerate(uncached_quantizer_list):
+                results.append(self._run_single_evaluation(idx, quantizers))
+        for idx, result in zip(uncached_idx, uncached_results):
+            assert results[idx] is None
+            results[idx] = result
         self.process_result(results)

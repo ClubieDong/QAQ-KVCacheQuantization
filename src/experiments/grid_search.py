@@ -16,7 +16,7 @@ params = [
     "n_bits_max",
     "last_n_attentions",
     "target_quantization_error",
-    "max_q_value",
+    "q_norm",
     "n_bits_uniform",
 ]
 relations = [
@@ -39,7 +39,7 @@ translation = {
     "n_bits_max": "Max # of bits",
     "last_n_attentions": "Last n attentions",
     "target_quantization_error": "Target error",
-    "max_q_value": "Max Q value",
+    "q_norm": "2-norm of query tensor",
     "n_bits_uniform": "Uniform # of bits",
     "accuracy": "Accuracy",
     "answer_log_probability": "Answer log probability",
@@ -59,7 +59,7 @@ class GridSearch(Experiment):
             "level": ["token", "layer", "head"],
             "symmetric": [False],
             "outliers_ratio": [0, 0.01],
-            "n_bits_uniform": [2, 3, 4, 6, 8],
+            "n_bits_uniform": [1, 2, 3, 4, 6, 8],
         }, {
             "key_or_value_cache": ["key"],
             "use_attentions": [True],
@@ -68,15 +68,10 @@ class GridSearch(Experiment):
             "symmetric": [False],
             "outliers_ratio": [0, 0.01],
             "last_n_attentions": [5],
-            "target_quantization_error": [
-                1000, 10000, 100000, 1000000,
-                1000, 10000, 100000, 1000000,
-                1000, 10000, 100000, 1000000,
-                1000, 10000, 100000, 1000000,
-            ],
-            "n_bits_min": [1, 2],
-            "n_bits_max": [8],
-            "max_q_value": [3],
+            "target_quantization_error": [0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0],
+            "n_bits_min": [0, 1, 2],
+            "n_bits_max": [3, 4],
+            "q_norm": [250, 300, 350],
         }])
         value_quantizers = build_quantizers([{
             "key_or_value_cache": ["value"],
@@ -85,7 +80,7 @@ class GridSearch(Experiment):
             "level": ["token", "layer", "head"],
             "symmetric": [False],
             "outliers_ratio": [0, 0.01],
-            "n_bits_uniform": [2, 3, 4, 6, 8],
+            "n_bits_uniform": [1, 2, 3, 4, 6, 8],
         }, {
             "key_or_value_cache": ["value"],
             "use_attentions": [True],
@@ -94,14 +89,10 @@ class GridSearch(Experiment):
             "symmetric": [False],
             "outliers_ratio": [0, 0.01],
             "last_n_attentions": [5],
-            "target_quantization_error": [
-                1, 1, 1, 1,
-                10, 10, 10, 10,
-                100, 100, 100, 100,
-                1000, 1000, 1000, 1000,
-            ],
-            "n_bits_min": [1, 2],
-            "n_bits_max": [8],
+            "target_quantization_error": [0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0],
+            "n_bits_min": [0, 1, 2],
+            "n_bits_max": [3, 4],
+            "q_norm": [None, None, None],
         }])
         return list(zip(key_quantizers, value_quantizers))
 
