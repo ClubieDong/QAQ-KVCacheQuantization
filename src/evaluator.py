@@ -152,7 +152,7 @@ class Evaluator:
         result.value_average_n_bits /= total_tokens
         return result
     
-    def is_result_cached(self, cache_file: Optional[str]) -> Optional[EvaluationResult]:
+    def get_cached_result(self, cache_file: Optional[str]) -> Optional[EvaluationResult]:
         if cache_file is None or not os.path.exists(cache_file):
             return None
         with open(cache_file, "r") as f:
@@ -176,11 +176,3 @@ class Evaluator:
         })
         with open(cache_file, "w") as f:
             json.dump(cached_results, f, indent=4, separators=(", ", ": "))
-
-    def cached_evaluate(self, model: LlamaForCausalLM, cache_file: Optional[str], use_tqdm: bool) -> EvaluationResult:
-        result = self.is_result_cached(cache_file)
-        if result is not None:
-            return result
-        result = self.evaluate(model, use_tqdm)
-        self.cache_result(cache_file, result)
-        return result

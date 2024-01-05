@@ -1,13 +1,12 @@
+import gc
 import abc
-import math
 import torch
-from typing import Optional
 from dataclasses import asdict
 from quantizer import Quantizer
 from functools import cached_property, cache
 from question import Question, load_questions
 from evaluator import Evaluator, EvaluationResult
-from multiprocessing import Pool, current_process
+from multiprocessing import queues, Queue, Lock, Process
 from accelerate import init_empty_weights, infer_auto_device_map
 from config import version, cache_file, hf_cache_dir, device_configs
 from transformers import LlamaConfig, LlamaForCausalLM, LlamaTokenizerFast
@@ -18,8 +17,8 @@ class Experiment(abc.ABC):
         self.model_name = model_name
         self.dtype = dtype
         self.question_count = question_count
-        self.parallel = parallel
         self.verbose = verbose
+        self.parallel = parallel and len(self.quantizer_list) > 1 and len(device_configs) > 1
 
     @cached_property
     def tokenizer(self) -> LlamaTokenizerFast:
@@ -50,43 +49,53 @@ class Experiment(abc.ABC):
     def process_result(self, results: list[EvaluationResult]):
         pass
 
-    def _run_single_evaluation(self, idx, quantizers: tuple[Quantizer, Quantizer]) -> EvaluationResult:
-        key_quantizer, value_quantizer = quantizers
-        if self.parallel:
-            worker_id = current_process()._identity[0] - 1
-        else:
-            worker_id = 0
+    def _run_single_evaluation(self, worker_id: int, task_queue: Queue, file_lock: Lock):
+        idx, key_quantizer, value_quantizer = task_queue.get(timeout=1)
         print(f"Running evaluation #{idx+1} on worker #{worker_id+1}...")
         device, _ = device_configs[worker_id]
-        model = self.get_model(worker_id)
         key_quantizer.set_dtype_and_device(self.dtype, device)
         value_quantizer.set_dtype_and_device(self.dtype, device)
         evaluator = Evaluator(device, version, self.model_name, self.questions, key_quantizer, value_quantizer)
-        result = evaluator.cached_evaluate(model, cache_file, use_tqdm=True)
+        with file_lock:
+            result = evaluator.get_cached_result(cache_file)
+        if result is None:
+            model = self.get_model(worker_id)
+            result = evaluator.evaluate(model, use_tqdm=not self.parallel)
+            with file_lock:
+                evaluator.cache_result(cache_file, result)
         if self.verbose:
             print(f"  Params: {evaluator.params}")
             print(f"  Results: {asdict(result)}")
             print("======================================")
-        return result
 
     def run(self):
-        results: list[Optional[EvaluationResult]] = []
+        file_lock = Lock()
+        task_queue = Queue()
+        for idx, (key_quantizer, value_quantizer) in enumerate(self.quantizer_list):
+            task_queue.put((idx, key_quantizer, value_quantizer))
+        def worker(worker_id: int):
+            while True:
+                try:
+                    self._run_single_evaluation(worker_id, task_queue, file_lock)
+                except queues.Empty:
+                    break
+                gc.collect()
+
+        if self.parallel:
+            _, _ = self.questions, self.tokenizer
+            process_list: list[Process] = []
+            for worker_id in range(len(device_configs)):
+                process = Process(target=worker, args=(worker_id,))
+                process_list.append(process)
+                process.start()
+            for process in process_list:
+                process.join()
+        else:
+            worker(0)
+        results: list[EvaluationResult] = []
         for key_quantizer, value_quantizer in self.quantizer_list:
             evaluator = Evaluator("cpu", version, self.model_name, self.questions, key_quantizer, value_quantizer)
-            result = evaluator.is_result_cached(cache_file)
+            result = evaluator.get_cached_result(cache_file)
+            assert result is not None
             results.append(result)
-        uncached_idx = [idx for idx, result in enumerate(results) if result is None]
-        uncached_quantizer_list = [self.quantizer_list[idx] for idx in uncached_idx]
-        if self.parallel and len(uncached_quantizer_list) > 0:
-            _, _ = self.questions, self.tokenizer
-            chunk_size = int(math.ceil(len(uncached_quantizer_list) / len(device_configs)))
-            with Pool(len(device_configs)) as pool:
-                uncached_results = pool.starmap(self._run_single_evaluation, enumerate(uncached_quantizer_list), chunksize=chunk_size)
-        else:
-            uncached_results = []
-            for idx, quantizers in enumerate(uncached_quantizer_list):
-                results.append(self._run_single_evaluation(idx, quantizers))
-        for idx, result in zip(uncached_idx, uncached_results):
-            assert results[idx] is None
-            results[idx] = result
         self.process_result(results)
