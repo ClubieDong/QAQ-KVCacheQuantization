@@ -14,3 +14,4 @@ if __name__ == "__main__":
     # exp.KeyValueDifference(model_name, dtype, question_count, parallel=True, verbose=True).run()
     # exp.KVcacheDistribution(model_name, dtype, question_count, parallel=True, verbose=True).run()
     exp.GridSearch(model_name, dtype, question_count, parallel=True, verbose=True).run()
+    # exp.AttentionInsight(model_name, dtype, question_count, parallel=True, verbose=True).run()
