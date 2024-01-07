@@ -68,10 +68,10 @@ class GridSearch(Experiment):
             "symmetric": [False],
             "outliers_ratio": [0, 0.01],
             "last_n_attentions": [5],
-            "target_quantization_error": [0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0],
+            "target_quantization_error": [0.3, 1.0, 3.0, 10.0],
             "n_bits_min": [0, 1, 2],
-            "n_bits_max": [3, 4],
-            "q_norm": [250, 300, 350],
+            "n_bits_max": [2, 3, 4],
+            "q_norm": [300],
         }])
         value_quantizers = build_quantizers([{
             "key_or_value_cache": ["value"],
@@ -89,10 +89,10 @@ class GridSearch(Experiment):
             "symmetric": [False],
             "outliers_ratio": [0, 0.01],
             "last_n_attentions": [5],
-            "target_quantization_error": [0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0],
+            "target_quantization_error": [0.3, 1.0, 3.0, 10.0],
             "n_bits_min": [0, 1, 2],
-            "n_bits_max": [3, 4],
-            "q_norm": [None, None, None],
+            "n_bits_max": [2, 3, 4],
+            "q_norm": [None],
         }])
         return list(zip(key_quantizers, value_quantizers))
 

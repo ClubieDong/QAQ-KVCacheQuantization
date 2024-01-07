@@ -3,12 +3,12 @@ import json
 import math
 import torch
 from tqdm import tqdm
-from question import Question
 from typing import Optional, Any
 from torch.nn import functional as F
 from functools import cached_property
 from dataclasses import dataclass, asdict
 from transformers import LlamaForCausalLM
+from qa_dataset import QADataset, Question
 from quantizer import Quantizer, AttentionType
 
 
@@ -34,13 +34,13 @@ class Evaluator:
     def __init__(self, device: torch.device,
                  version: str,
                  model_name: str,
-                 questions: list[Question],
+                 datasets: QADataset,
                  key_quantizer: Quantizer,
                  value_quantizer: Quantizer):
         self.device = device
         self.version = version
         self.model_name = model_name
-        self.questions = questions
+        self.datasets = datasets
         self.key_quantizer = key_quantizer
         self.value_quantizer = value_quantizer
 
@@ -49,7 +49,8 @@ class Evaluator:
         res: dict[str, Any] = {}
         res["version"] = self.version
         res["model_name"] = self.model_name
-        res["question_count"] = len(self.questions)
+        res["dataset_name"] = self.datasets.dataset_name
+        res["question_count"] = self.datasets.question_count
         res["key_quantizer"] = self.key_quantizer.params
         res["value_quantizer"] = self.value_quantizer.params
         return res
@@ -71,7 +72,10 @@ class Evaluator:
         value_cache = torch.stack([value[:,:,:question_len,:].to(self.device) for _, value in result.past_key_values])
         quantized_key_cache, key_average_n_bits = self.key_quantizer.quantize(key_cache, question_attentions)
         quantized_value_cache, value_average_n_bits = self.value_quantizer.quantize(value_cache, question_attentions)
-        quantized_kvcache = list(zip(quantized_key_cache, quantized_value_cache))
+        quantized_kvcache = [
+            (key.to(result.past_key_values[idx][0].device), value.to(result.past_key_values[idx][0].device))
+            for idx, (key, value) in enumerate(zip(quantized_key_cache, quantized_value_cache))
+        ]
         # Forward after quantization
         quantized_result = model.forward(input_ids[:,question_len:], past_key_values=quantized_kvcache, use_cache=True, output_attentions=True, return_dict=True)
         # Calculate log probabilities
@@ -118,7 +122,7 @@ class Evaluator:
         result = EvaluationResult()
         total_tokens = 0
         with torch.no_grad():
-            for question in tqdm(self.questions) if use_tqdm else self.questions:
+            for question in tqdm(self.datasets.questions) if use_tqdm else self.datasets.questions:
                 single_result = self._evaluate_single(model, question)
                 n_tokens = question.question_length
                 total_tokens += n_tokens
@@ -135,15 +139,15 @@ class Evaluator:
                 result.average_n_bits += single_result.average_n_bits * n_tokens
                 result.key_average_n_bits += single_result.key_average_n_bits * n_tokens
                 result.value_average_n_bits += single_result.value_average_n_bits * n_tokens
-        result.accuracy /= len(self.questions)
+        result.accuracy /= self.datasets.question_count
         # Calculate 95% confidence interval
-        result.accuracy_confidence = 1.96 * math.sqrt(result.accuracy * (1.0 - result.accuracy) / len(self.questions))
-        result.answer_log_probability /= len(self.questions)
-        result.quantization_error /= len(self.questions)
-        result.key_quantization_error /= len(self.questions)
-        result.value_quantization_error /= len(self.questions)
-        result.attention_error /= len(self.questions)
-        result.logit_error /= len(self.questions)
+        result.accuracy_confidence = 1.96 * math.sqrt(result.accuracy * (1.0 - result.accuracy) / self.datasets.question_count)
+        result.answer_log_probability /= self.datasets.question_count
+        result.quantization_error /= self.datasets.question_count
+        result.key_quantization_error /= self.datasets.question_count
+        result.value_quantization_error /= self.datasets.question_count
+        result.attention_error /= self.datasets.question_count
+        result.logit_error /= self.datasets.question_count
         result.average_size /= total_tokens
         result.key_average_size /= total_tokens
         result.value_average_size /= total_tokens

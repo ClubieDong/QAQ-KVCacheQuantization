@@ -3,8 +3,8 @@ import abc
 import torch
 from dataclasses import asdict
 from quantizer import Quantizer
+from qa_dataset import QADataset
 from functools import cached_property, cache
-from question import Question, load_questions
 from evaluator import Evaluator, EvaluationResult
 from multiprocessing import queues, Queue, Lock, Process
 from accelerate import init_empty_weights, infer_auto_device_map
@@ -13,8 +13,9 @@ from transformers import LlamaConfig, LlamaForCausalLM, LlamaTokenizerFast
 
 
 class Experiment(abc.ABC):
-    def __init__(self, model_name: str, dtype: torch.dtype, question_count: int, parallel: bool, verbose: bool):
+    def __init__(self, model_name: str, dataset_name: str, dtype: torch.dtype, question_count: int, parallel: bool, verbose: bool):
         self.model_name = model_name
+        self.dataset_name = dataset_name
         self.dtype = dtype
         self.question_count = question_count
         self.verbose = verbose
@@ -38,8 +39,8 @@ class Experiment(abc.ABC):
         return model
 
     @cached_property
-    def questions(self) -> list[Question]:
-        return load_questions(self.tokenizer, self.question_count)
+    def datasets(self) -> QADataset:
+        return QADataset(self.dataset_name, self.tokenizer, self.question_count)
 
     @cached_property
     def quantizer_list(self) -> list[tuple[Quantizer, Quantizer]]:
@@ -55,12 +56,12 @@ class Experiment(abc.ABC):
         device, _ = device_configs[worker_id]
         key_quantizer.set_dtype_and_device(self.dtype, device)
         value_quantizer.set_dtype_and_device(self.dtype, device)
-        evaluator = Evaluator(device, version, self.model_name, self.questions, key_quantizer, value_quantizer)
+        evaluator = Evaluator(device, version, self.model_name, self.datasets, key_quantizer, value_quantizer)
         with file_lock:
             result = evaluator.get_cached_result(cache_file)
         if result is None:
             model = self.get_model(worker_id)
-            result = evaluator.evaluate(model, use_tqdm=not self.parallel)
+            result = evaluator.evaluate(model, use_tqdm=True)
             with file_lock:
                 evaluator.cache_result(cache_file, result)
         if self.verbose:
@@ -82,7 +83,7 @@ class Experiment(abc.ABC):
                 gc.collect()
 
         if self.parallel:
-            _, _ = self.questions, self.tokenizer
+            _, _ = self.datasets, self.tokenizer
             process_list: list[Process] = []
             for worker_id in range(len(device_configs)):
                 process = Process(target=worker, args=(worker_id,))
@@ -94,7 +95,7 @@ class Experiment(abc.ABC):
             worker(0)
         results: list[EvaluationResult] = []
         for key_quantizer, value_quantizer in self.quantizer_list:
-            evaluator = Evaluator("cpu", version, self.model_name, self.questions, key_quantizer, value_quantizer)
+            evaluator = Evaluator("cpu", version, self.model_name, self.datasets, key_quantizer, value_quantizer)
             result = evaluator.get_cached_result(cache_file)
             assert result is not None
             results.append(result)
