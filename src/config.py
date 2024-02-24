@@ -2,28 +2,27 @@ import torch
 
 version = "2023/01/04-#01"
 cache_file = "cache/results.json"
-# hf_cache_dir = "/webdav/MyData/shichen/HuggingFaceCache"
-hf_cache_dir = "/webdav/MyData/shichen/HuggingFaceCacheMemory"
+hf_cache_dir = None
 
-# 8xV100 & Llama-2-7B
-device_configs = [
-    (torch.device("cuda:0"), {0: "32GB", "cpu": "400GB"}),
-    (torch.device("cuda:1"), {1: "32GB", "cpu": "400GB"}),
-    (torch.device("cuda:2"), {2: "32GB", "cpu": "400GB"}),
-    (torch.device("cuda:3"), {3: "32GB", "cpu": "400GB"}),
-    (torch.device("cuda:4"), {4: "32GB", "cpu": "400GB"}),
-    (torch.device("cuda:5"), {5: "32GB", "cpu": "400GB"}),
-    (torch.device("cuda:6"), {6: "32GB", "cpu": "400GB"}),
-    (torch.device("cuda:7"), {7: "32GB", "cpu": "400GB"}),
-]
-
-# # 8xV100 & Llama-2-13B
+# # 8xV100 & Llama-2-7B
 # device_configs = [
-#     (torch.device("cuda:0"), {0: "10GB", 1: "30GB", "cpu": "400GB"}),
-#     (torch.device("cuda:2"), {2: "10GB", 3: "30GB", "cpu": "400GB"}),
-#     (torch.device("cuda:4"), {4: "10GB", 5: "30GB", "cpu": "400GB"}),
-#     (torch.device("cuda:6"), {6: "10GB", 7: "30GB", "cpu": "400GB"}),
+#     (torch.device("cuda:0"), {0: "32GB", "cpu": "400GB"}),
+#     (torch.device("cuda:1"), {1: "32GB", "cpu": "400GB"}),
+#     (torch.device("cuda:2"), {2: "32GB", "cpu": "400GB"}),
+#     (torch.device("cuda:3"), {3: "32GB", "cpu": "400GB"}),
+#     (torch.device("cuda:4"), {4: "32GB", "cpu": "400GB"}),
+#     (torch.device("cuda:5"), {5: "32GB", "cpu": "400GB"}),
+#     (torch.device("cuda:6"), {6: "32GB", "cpu": "400GB"}),
+#     (torch.device("cuda:7"), {7: "32GB", "cpu": "400GB"}),
 # ]
+
+# 8xV100 & Llama-2-13B
+device_configs = [
+    (torch.device("cuda:0"), {0: "10GB", 1: "30GB", "cpu": "400GB"}),
+    (torch.device("cuda:2"), {2: "10GB", 3: "30GB", "cpu": "400GB"}),
+    (torch.device("cuda:4"), {4: "10GB", 5: "30GB", "cpu": "400GB"}),
+    (torch.device("cuda:6"), {6: "10GB", 7: "30GB", "cpu": "400GB"}),
+]
 
 # # 8xV100 & Llama-2-70B
 # device_configs = [

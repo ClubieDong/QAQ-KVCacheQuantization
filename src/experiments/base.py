@@ -1,4 +1,3 @@
-import gc
 import abc
 import torch
 from dataclasses import asdict
@@ -80,10 +79,9 @@ class Experiment(abc.ABC):
                     self._run_single_evaluation(worker_id, task_queue, file_lock)
                 except queues.Empty:
                     break
-                gc.collect()
 
         if self.parallel:
-            _, _ = self.datasets, self.tokenizer
+            _, _ = self.datasets.questions, self.tokenizer
             process_list: list[Process] = []
             for worker_id in range(len(device_configs)):
                 process = Process(target=worker, args=(worker_id,))

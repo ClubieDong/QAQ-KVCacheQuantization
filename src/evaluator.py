@@ -1,4 +1,5 @@
 import os
+import gc
 import json
 import math
 import torch
@@ -122,7 +123,7 @@ class Evaluator:
         result = EvaluationResult()
         total_tokens = 0
         with torch.no_grad():
-            for question in tqdm(self.datasets.questions) if use_tqdm else self.datasets.questions:
+            for idx, question in enumerate(tqdm(self.datasets.questions) if use_tqdm else self.datasets.questions):
                 single_result = self._evaluate_single(model, question)
                 n_tokens = question.question_length
                 total_tokens += n_tokens
@@ -139,6 +140,8 @@ class Evaluator:
                 result.average_n_bits += single_result.average_n_bits * n_tokens
                 result.key_average_n_bits += single_result.key_average_n_bits * n_tokens
                 result.value_average_n_bits += single_result.value_average_n_bits * n_tokens
+                if (idx + 1) % 100 == 0:
+                    gc.collect()
         result.accuracy /= self.datasets.question_count
         # Calculate 95% confidence interval
         result.accuracy_confidence = 1.96 * math.sqrt(result.accuracy * (1.0 - result.accuracy) / self.datasets.question_count)
