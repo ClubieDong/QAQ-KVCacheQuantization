@@ -40,7 +40,7 @@ There are three important classes:
 
 To run a new experiment, you need to derive the `Experiment` class, override the `quantizer_list` and `process_result` functions, and finally call the `run` function of your derived class in the entry point. There are some sample experiments in the `src/experiments` folder that are used in our paper.
 
-# Citation
+## Citation
 
 If you use this codebase, or QAQ inspires your work, please cite:
 
