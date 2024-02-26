@@ -2,7 +2,13 @@
 
 ## Introduction
 
-TODO
+This is the official repository of [QAQ: Quality Adaptive Quantization for LLM KV Cache]().
+
+### Brief abstract
+
+As the need for longer context grows, a significant bottleneck in model deployment emerges due to the linear expansion of the Key-Value (KV) cache with the context length. Based on three key insights, we propose the QAQ, a $\underline{\text{Q}}\text{uality}$ $\underline{\text{A}}\text{daptive}$ $\underline{\text{Q}}\text{uantization}$ scheme for LLM KV Cache. QAQ achieves nearly $10 \times$ compression of KV cache with neglectable accuracy loss. 
+
+For more details, please refer to our paper.
 
 ## Environment setup
 
@@ -34,4 +40,6 @@ To run a new experiment, you need to derive the `Experiment` class, override the
 
 # Citation
 
-TODO
+If you use this codebase, or QAQ inspires your work, please cite:
+
+```markdown 
