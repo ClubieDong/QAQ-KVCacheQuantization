@@ -4,11 +4,11 @@ import json
 import math
 import torch
 from tqdm import tqdm
+from models import CausalLM
 from typing import Optional, Any
 from torch.nn import functional as F
 from functools import cached_property
 from dataclasses import dataclass, asdict
-from transformers import LlamaForCausalLM
 from qa_dataset import QADataset, Question
 from quantizer import Quantizer, AttentionType
 
@@ -62,7 +62,7 @@ class Evaluator:
     def _calc_attention_error(self, attention1: AttentionType, attention2: AttentionType) -> float:
         return sum(self._calc_tensor_error(attn1, attn2) for attn1, attn2 in zip(attention1, attention2)) / len(attention1)
 
-    def _evaluate_single(self, model: LlamaForCausalLM, question: Question) -> EvaluationResult:
+    def _evaluate_single(self, model: CausalLM, question: Question) -> EvaluationResult:
         question_len = question.question_length
         # Forward before quantization
         input_ids = question.input_ids.to(self.device)
@@ -118,7 +118,7 @@ class Evaluator:
             value_average_n_bits=value_average_n_bits,
         )
 
-    def evaluate(self, model: LlamaForCausalLM, use_tqdm: bool) -> EvaluationResult:
+    def evaluate(self, model: CausalLM, use_tqdm: bool) -> EvaluationResult:
         assert model.name_or_path == self.model_name
         result = EvaluationResult()
         total_tokens = 0

@@ -1,10 +1,10 @@
 import re
 import torch
 import random
+from models import Tokenizer
 from config import hf_cache_dir
 from datasets import load_dataset
 from dataclasses import dataclass
-from transformers import LlamaTokenizerFast
 from functools import cached_property
 
 
@@ -19,7 +19,7 @@ class Question:
 
 
 class QADataset:
-    def __init__(self, dataset_name: str, tokenizer: LlamaTokenizerFast, question_count: int):
+    def __init__(self, dataset_name: str, tokenizer: Tokenizer, question_count: int):
         self.dataset_name = dataset_name
         self.tokenizer = tokenizer
         self.question_count = question_count

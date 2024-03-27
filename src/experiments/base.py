@@ -3,12 +3,13 @@ import torch
 from dataclasses import asdict
 from quantizer import Quantizer
 from qa_dataset import QADataset
+from models import CausalLM, Tokenizer
 from functools import cached_property, cache
 from evaluator import Evaluator, EvaluationResult
 from multiprocessing import queues, Queue, Lock, Process
 from accelerate import init_empty_weights, infer_auto_device_map
 from config import version, cache_file, hf_cache_dir, device_configs
-from transformers import LlamaConfig, LlamaForCausalLM, LlamaTokenizerFast
+from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
 
 
 class Experiment(abc.ABC):
@@ -21,20 +22,21 @@ class Experiment(abc.ABC):
         self.parallel = parallel and len(self.quantizer_list) > 1 and len(device_configs) > 1
 
     @cached_property
-    def tokenizer(self) -> LlamaTokenizerFast:
-        tokenizer = LlamaTokenizerFast.from_pretrained(self.model_name, cache_dir=hf_cache_dir)
+    def tokenizer(self) -> Tokenizer:
+        tokenizer = AutoTokenizer.from_pretrained(self.model_name, cache_dir=hf_cache_dir)
         tokenizer.pad_token_id = 0
         return tokenizer
 
     @cache
-    def get_model(self, worker_id: int) -> LlamaForCausalLM:
+    def get_model(self, worker_id: int) -> CausalLM:
         with init_empty_weights():
-            model = LlamaForCausalLM(LlamaConfig.from_pretrained(self.model_name, cache_dir=hf_cache_dir))
+            model = AutoModelForCausalLM.from_config(AutoConfig.from_pretrained(self.model_name, cache_dir=hf_cache_dir))
         _, max_memory = device_configs[worker_id]
-        device_map = infer_auto_device_map(model, max_memory=max_memory, dtype=self.dtype, no_split_module_classes=LlamaForCausalLM._no_split_modules)
+        model.tie_weights()
+        device_map = infer_auto_device_map(model, max_memory=max_memory, dtype=self.dtype, no_split_module_classes=model._no_split_modules)
         if any(x == "cpu" or x == "disk" for x in device_map.values()):
             print("Warning: CPU offloading enabled!")
-        model = LlamaForCausalLM.from_pretrained(self.model_name, device_map=device_map, torch_dtype=self.dtype, cache_dir=hf_cache_dir).eval()
+        model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map=device_map, torch_dtype=self.dtype, cache_dir=hf_cache_dir).eval()
         return model
 
     @cached_property

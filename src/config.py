@@ -1,6 +1,6 @@
 import torch
 
-version = "2023/01/04-#01"
+version = "2023/03/20-#02"
 cache_file = "cache/results.json"
 hf_cache_dir = None
 

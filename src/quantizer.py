@@ -1,11 +1,11 @@
 import math
 import torch
 import numpy as np
+from models import CausalLM
 from scipy.stats import norm
 from itertools import product
 from functools import cached_property
 from typing import Literal, Optional, Any
-from transformers import LlamaForCausalLM
 
 
 AttentionType = list[torch.Tensor]
@@ -283,7 +283,7 @@ class Quantizer:
         # cache.shape: (n_layer, n_batch, n_head, seq_len, embed_size_per_head)
         return cache, average_n_bits
 
-    def calc_quantized_cache_size_per_token(self, average_n_bits: float, model: LlamaForCausalLM) -> float:
+    def calc_quantized_cache_size_per_token(self, average_n_bits: float, model: CausalLM) -> float:
         cache_size = average_n_bits * model.config.num_hidden_layers * model.config.hidden_size
         default_n_bits = torch.finfo(self.dtype).bits
         n_extra = 0 if self.level == "no-quantization" else 1 if self.symmetric else 2
